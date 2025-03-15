@@ -130,20 +130,29 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
     # breakpoint()
     pairs_in = convert_dust3r_pairs_naming(imgs, pairs_in)
     #'instance'가 int에서 file path로 바뀌었음
-    breakpoint()
+    # breakpoint()
     # forward pass
     pairs, cache_path = forward_mast3r(pairs_in, model,
                                        cache_path=cache_path, subsample=subsample,
                                        desc_conf=desc_conf, device=device)
-    breakpoint()
+    #mast3r forward하면서 focal도 계산됨
+    # breakpoint()
 
-    # extract canonical pointmaps
+    # imgs : list
+    # image 경로들의 list
+    # pairs_in : list
+    # image의 정보를 저장한 dict을 tuple로 pair를 만들어서 구성된 list
+    # pairs : dict
+    # tuple:tuple 형태로 key를 가지고 있는 dict, 앞쪽 tuple은 image 경로, 뒤 tuple은 ((forward1, forward2), corres)로 이루어진 tuple
+
+    # extract canonical pointmaps, image 한장씩마다 좌표계를 일치시킨 정보를 모음
     tmp_pairs, pairwise_scores, canonical_views, canonical_paths, preds_21 = \
         prepare_canonical_data(imgs, pairs, subsample, cache_path=cache_path, mode='avg-angle', device=device)
-    breakpoint()
+    # breakpoint()
+
     # compute minimal spanning tree
     mst = compute_min_spanning_tree(pairwise_scores)
-    breakpoint()
+    # breakpoint()
     # remove all edges not in the spanning tree?
     # min_spanning_tree = {(imgs[i],imgs[j]) for i,j in mst[1]}
     # tmp_pairs = {(a,b):v for (a,b),v in tmp_pairs.items() if {(a,b),(b,a)} & min_spanning_tree}
@@ -151,11 +160,11 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
     # smartly combine all useful data
     imsizes, pps, base_focals, core_depth, anchors, corres, corres2d, preds_21 = \
         condense_data(imgs, tmp_pairs, canonical_views, preds_21, dtype)
-    breakpoint()
+    # breakpoint()
     imgs, res_coarse, res_fine = sparse_scene_optimizer(
         imgs, subsample, imsizes, pps, base_focals, core_depth, anchors, corres, corres2d, preds_21, canonical_paths, mst,
         shared_intrinsics=shared_intrinsics, cache_path=cache_path, device=device, dtype=dtype, **kw)
-    breakpoint()
+    # breakpoint()
     return SparseGA(imgs, pairs_in, res_fine or res_coarse, anchors, canonical_paths)
 
 
@@ -164,7 +173,7 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
                            lr1=0.2, niter1=500, loss1=gamma_loss(1.1),
                            lr2=0.02, niter2=500, loss2=gamma_loss(0.4),
                            lossd=gamma_loss(1.1),
-                           opt_pp=True, opt_depth=True,
+                           opt_pp=True, opt_depth=False,
                            schedule=cosine_schedule, depth_mode='add', exp_depth=False,
                            lora_depth=False,  # dict(k=96, gamma=15, min_norm=.5),
                            shared_intrinsics=False,
@@ -322,6 +331,7 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
         curstep = 0
         cleaned_slices = []
         for img2, slice2 in imgs_slices:
+            # breakpoint()
             if is_matching_ok[img1, img2]:
                 tslice = slice(curstep, curstep + slice2.stop - slice2.start, slice2.step)
                 pix1_filtered.append(pix1[tslice])
@@ -451,7 +461,8 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
                 continue
             pps[i].requires_grad_(bool(opt_pp))
             log_focals[i].requires_grad_(True)
-            core_depth[i].requires_grad_(opt_depth)
+            # core_depth[i].requires_grad_(opt_depth)
+            core_depth[i].requires_grad_(False)
 
         # refinement with 2d reproj
         res_fine = optimize_loop(loss_2d, lr_base=lr2, niter=niter2, pix_loss=loss2)
@@ -653,8 +664,7 @@ def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_con
             canon = focal = None
 
         # collect all pred1
-        n_pairs = sum((img in pair) for pair in tmp_pairs)
-
+        n_pairs = sum((img in pair) for pair in tmp_pairs) # dual-arm에서는 1, pair끼리 겹치는 이미지가 없음
         ptmaps11 = None
         pixels = {}
         n = 0

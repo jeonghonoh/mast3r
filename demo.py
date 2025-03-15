@@ -21,14 +21,14 @@ from dust3r.demo import set_print_with_timestamp
 import matplotlib.pyplot as pl
 pl.ion()
 
-torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >= 1.12
+torch.backends.cuda.matmul.allow_tf32 = False  # for gpu >= Ampere and pytorch >= 1.12
 
 if __name__ == '__main__':
     parser = get_args_parser()
     args = parser.parse_args()
     set_print_with_timestamp()
     
-    ORIGINAL_CODE = True
+    ORIGINAL_CODE = False
     if ORIGINAL_CODE:
         if args.server_name is not None:
             server_name = args.server_name
@@ -59,7 +59,18 @@ if __name__ == '__main__':
         else:
             weights_path = "naver/" + args.model_name
         model = AsymmetricMASt3R.from_pretrained(weights_path).to(args.device)
-        breakpoint()
-        forward_two_images(data_path = args.data_path, model = model, device = args.device, image_size=args.image_size, silent=False)
+        # breakpoint()
+
+        # forward_two_images(data_path = args.data_path, model = model, device = args.device, image_size=args.image_size, silent=False)
         
+
+
+        # seq_01 70~79 차 충돌, 120~129 공만 움직임, 300~304 휴지 and 공 멈춤, 306~313 휴지 움직임
+        # seq_02 95~105 뷰 겹치는 멈춰있는거, 125~140 로봇팔 움직이는거 찍힌거 197~202 공만 움직임 290~293 차 충돌
+
+        datapath = "/workspace/data/jeonghonoh/dataset/dynamic/dual_arm/seq_02"
+        srt_frame = 95
+        end_frame = 105
+
+        forward_two_images(data_path = datapath, srt_frame = srt_frame, end_frame = end_frame, model = model, device = args.device, image_size=args.image_size, silent=False)
     

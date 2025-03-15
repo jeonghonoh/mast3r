@@ -344,7 +344,7 @@ from dust3r.utils.image import _resize_pil_image
 
 ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-def load_stereo_data(folder_path, size, square_ok=False, verbose=True):
+def load_stereo_data(folder_path, srt_frame, end_frame, size, square_ok=False, verbose=True, debug_mode=False):
     """ open and convert all images in a list or folder to proper input format for DUSt3R
     """
     if isinstance(folder_path, str):
@@ -378,7 +378,21 @@ def load_stereo_data(folder_path, size, square_ok=False, verbose=True):
         print(f'Right intrinsic matrix: {right_intrinsic}')
     
     samples = []
+    cnt = 0
+    debug_mode = False
     for entry in metadata:
+        if debug_mode and cnt == 3:
+            break
+
+        if entry.get("sample_number", None) is not None:
+            #srt_frame ~ end_frame
+            if entry.get("sample_number", None) < srt_frame or entry.get("sample_number", None) > end_frame:
+                continue
+            else:
+                cnt += 1
+        # else:
+        #     print(f"entry.get('sample_number', None): {entry.get('sample_number', None)}")
+
         # Extract paths from metadata
         left_img_rel = entry["image_left"]
         right_img_rel = entry["image_right"]
@@ -419,7 +433,8 @@ def load_stereo_data(folder_path, size, square_ok=False, verbose=True):
         assert left_img.size == right_img.size, f'cropped: left and right images must have the same size'
         
         W, H = left_img.size
-        if verbose and entry.get("sample_number", None) % 100 == 0:
+        # if verbose and entry.get("sample_number", None) % 100 == 1:
+        if verbose:
             print(f' - adding {left_img_rel} and {right_img_rel} with resolution {W_origin}x{H_origin} --> {W_resize}x{H_resize} --> {W}x{H}')
         
         #intrinsic matrix for modified images
@@ -476,8 +491,8 @@ def load_stereo_data(folder_path, size, square_ok=False, verbose=True):
             "right_img": right_img,         # PIL Image
             "left_depth": left_depth,   # numpy array
             "right_depth": right_depth, # numpy array
-            "left_pose": left_pose,    # raw text
-            "right_pose": right_pose,  # raw text
+            "left_pose": left_pose,    # numpy array
+            "right_pose": right_pose,  # numpy array
             "left_intrinsic": left_intrinsic_modified, # numpy array
             "right_intrinsic": right_intrinsic_modified, # numpy array
             "image_left_timestamp": entry.get("image_left_timestamp", None),
@@ -491,22 +506,29 @@ def load_stereo_data(folder_path, size, square_ok=False, verbose=True):
         
         samples.append(sample)
 
-        if verbose and entry.get("sample_number", None) % 100 == 0:
+        # if verbose and entry.get("sample_number", None) % 100 == 1:
+        if verbose:
             print(f"Loaded sample ~{entry.get('sample_number', '?')}")
+            print(f"modified left intrinsic matrix: {left_intrinsic_modified}")
+            print(f"modified right intrinsic matrix: {right_intrinsic_modified}")
 
     if verbose:
         print(f"Total samples loaded: {len(samples)}")
     return samples 
     
 
-def make_stereo_pairs(samples):
-    filelist = []
-    imgs = []
-    # {'img': tensor형식, 'true_shape': array([[288, 512]], dtype=int32), 'idx': 1, 'instance': '1'}
-    #imgs.append(dict(img=ImgNorm(img)[None], true_shape=np.int32(
-            # [img.size[::-1]]), idx=len(imgs), instance=str(len(imgs))))
-    pairs = [] #tuple의 리스트
+def make_stereo_pairs(samples, symmetrize=True):
+    filelist_total = []
+    pairs_total = []
+
+    
     for sample in samples:
+        filelist = []
+        imgs = []
+        # {'img': tensor형식, 'true_shape': array([[288, 512]], dtype=int32), 'idx': 1, 'instance': '1'}
+        #imgs.append(dict(img=ImgNorm(img)[None], true_shape=np.int32(
+                # [img.size[::-1]]), idx=len(imgs), instance=str(len(imgs))))
+        pairs = [] #tuple의 리스트
         left_img = sample["left_img"]
         right_img = sample["right_img"]
         left_dict = dict(img=ImgNorm(left_img)[None], true_shape=np.int32([left_img.size[::-1]]), idx=len(imgs), instance=str(len(imgs)))
@@ -518,18 +540,161 @@ def make_stereo_pairs(samples):
         filelist.append(sample["right_img_path"])
         
         pairs.append((left_dict, right_dict))
+        
+        if symmetrize:
+            pairs.append((right_dict, left_dict))
+
+        filelist_total.append(filelist)
+        pairs_total.append(pairs)
+
+    return filelist_total, pairs_total
     
-    return filelist, pairs
+
+import torch
+from tqdm import tqdm
+from third_party.raft import load_RAFT
+from dust3r.utils.geom_opt import OccMask
+
+# 예시 사용법:
+# samples = load_stereo_data(data_path, srt_frame, end_frame, size=512, verbose=True)
+# left_imgs, right_imgs = make_flow_image_lists(samples)
+# flow_left, flow_right, valid_mask_left, valid_mask_right = get_flow(left_imgs, right_imgs)
+def make_flow_image_lists(samples):
+    """
+    Given a list of samples (from load_stereo_data), extract left and right images
+    as numpy arrays suitable for optical flow computation.
     
+    Each sample is expected to have the following keys:
+      - "left_img": PIL Image for left view.
+      - "right_img": PIL Image for right view.
     
+    Returns:
+      left_imgs: list of numpy arrays, each of shape (H, W, 3)
+      right_imgs: list of numpy arrays, each of shape (H, W, 3)
+    """
+    left_imgs = []
+    right_imgs = []
+    
+    for sample in samples:
+        # Convert PIL images to numpy arrays
+        left_img_np = np.array(sample["left_img"])
+        right_img_np = np.array(sample["right_img"])
+        left_imgs.append(left_img_np)
+        right_imgs.append(right_img_np)
+    
+    return left_imgs, right_imgs
+
+def get_flow(left_imgs: list, right_imgs: list, model_path="third_party/RAFT/models/Tartan-C-T-TSKH-spring540x960-M.pth"):
+    """
+    Compute optical flow for two sequences of images:
+      - left_imgs: list of left image numpy arrays, shape (H, W, C)
+      - right_imgs: list of right image numpy arrays, shape (H, W, C)
+    
+    For each sequence, optical flow is computed between consecutive frames
+    (both forward: frame i -> frame i+1, and backward: frame i+1 -> frame i).
+    
+    Returns:
+      A tuple: (left_flow_forward, left_flow_backward, left_valid_mask),
+               (right_flow_forward, right_flow_backward, right_valid_mask)
+    """
+    print('Precomputing flow...')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    get_valid_flow_mask = OccMask(th=3.0)
+    
+    # Convert lists of images (numpy arrays) into tensors with shape (N, H, W, C)
+    left_tensor = torch.tensor(np.stack(left_imgs)).float().to(device)
+    right_tensor = torch.tensor(np.stack(right_imgs)).float().to(device)
+    
+    # Load RAFT model using the given model_path
+    flow_net = load_RAFT(model_path)
+    flow_net = flow_net.to(device)
+    flow_net.eval()
+    
+    def compute_flow_seq(img_seq):
+        """ Compute forward and backward flow between consecutive frames in a sequence. """
+        flows_forward = []
+        flows_backward = []
+        num = img_seq.shape[0]
+        chunk_size = 12
+        for i in tqdm(range(0, num - 1, chunk_size), desc="Processing sequence"):
+            end_idx = min(i + chunk_size, num - 1)
+            # Prepare source (frame i) and target (frame i+1) frames
+            src = img_seq[i:end_idx].permute(0, 3, 1, 2) * 255  # (B, C, H, W)
+            tgt = img_seq[i+1:end_idx+1].permute(0, 3, 1, 2) * 255
+            # Compute forward flow: src -> tgt
+            flow_forward = flow_net(src, tgt, iters=20, test_mode=True)[1]
+            # Compute backward flow: tgt -> src
+            flow_backward = flow_net(tgt, src, iters=20, test_mode=True)[1]
+            flows_forward.append(flow_forward)
+            flows_backward.append(flow_backward)
+        if flows_forward:
+            flows_forward = torch.cat(flows_forward, dim=0)
+            flows_backward = torch.cat(flows_backward, dim=0)
+        else:
+            flows_forward = torch.empty(0)
+            flows_backward = torch.empty(0)
+        return flows_forward, flows_backward
+
+    with torch.no_grad():
+        # Compute flows for left and right sequences separately
+        left_flow_forward, left_flow_backward = compute_flow_seq(left_tensor)
+        right_flow_forward, right_flow_backward = compute_flow_seq(right_tensor)
+        
+        # Compute valid masks for each sequence using OccMask
+        left_valid_mask = get_valid_flow_mask(left_flow_forward, left_flow_backward)
+        right_valid_mask = get_valid_flow_mask(right_flow_forward, right_flow_backward)
+    
+    print('Flow precomputed.')
+    if flow_net is not None:
+        del flow_net
+    return (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask)
+
+
+
+# def get_flow(left_imgs: list, right_imgs: list):
+#     print('precomputing flow...')
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#     get_valid_flow_mask = OccMask(th=3.0)
+#     # pair_imgs : [(num, W, H, 3), (num, W, H, 3)]
+#     # (90, 512, 272, 3)
+#     # pair_imgs = [np.stack(self.imgs)[self._ei], np.stack(self.imgs)[self._ej]]
+    
+
+#     flow_net = load_RAFT("third_party/RAFT/models/Tartan-C-T-TSKH-spring540x960-M.pth")
+#     flow_net = flow_net.to(device)
+#     flow_net.eval()
+
+#     with torch.no_grad():
+#         chunk_size = 12
+#         flow_ij = []
+#         flow_ji = []
+#         num_pairs = len(pair_imgs[0])
+#         for i in tqdm(range(0, num_pairs, chunk_size)):
+#             end_idx = min(i + chunk_size, num_pairs)
+#             imgs_ij = [torch.tensor(pair_imgs[0][i:end_idx]).float().to(device),
+#                     torch.tensor(pair_imgs[1][i:end_idx]).float().to(device)]
+#             flow_ij.append(flow_net(imgs_ij[0].permute(0, 3, 1, 2) * 255, 
+#                                     imgs_ij[1].permute(0, 3, 1, 2) * 255, 
+#                                     iters=20, test_mode=True)[1])
+#             flow_ji.append(flow_net(imgs_ij[1].permute(0, 3, 1, 2) * 255, 
+#                                     imgs_ij[0].permute(0, 3, 1, 2) * 255, 
+#                                     iters=20, test_mode=True)[1])
+
+#         flow_ij = torch.cat(flow_ij, dim=0)
+#         flow_ji = torch.cat(flow_ji, dim=0)
+#         valid_mask_i = get_valid_flow_mask(flow_ij, flow_ji)
+#         valid_mask_j = get_valid_flow_mask(flow_ji, flow_ij)
+#     print('flow precomputed')
+#     # delete the flow net
+#     if flow_net is not None: del flow_net
+#     return flow_ij, flow_ji, valid_mask_i, valid_mask_j
     
 
 # def forward_two_images(data_path, outdir, gradio_delete_cache, model, device, silent, image_size, current_scene_state,
 #                             filelist, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
 #                             as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size, scenegraph_type, winsize,
 #                             win_cyclic, refid, TSDF_thresh, shared_intrinsics, **kw):
-def forward_two_images(data_path, model, device, image_size = 512, silent = False):
-    
+def forward_two_images(data_path, srt_frame, end_frame, model, device, image_size = 512, silent = False):
     # scene, inputfiles, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
     # as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size,
     # scenegraph_type, winsize, win_cyclic, refid, TSDF_thresh, shared_intrinsics
@@ -547,16 +712,40 @@ def forward_two_images(data_path, model, device, image_size = 512, silent = Fals
     if optim_level == 'coarse':
         niter2 = 0
     
-    samples = load_stereo_data(data_path, size=image_size, verbose=not silent)
+    samples = load_stereo_data(data_path, srt_frame, end_frame, size=image_size, verbose=not silent)
+    # breakpoint()
+    filelist_total, pairs_total = make_stereo_pairs(samples) #filelist: 이미지 경로 리스트 2n개, pairs: 이미지 쌍의 리스트 n개
     
     # breakpoint()
-    filelist, pairs = make_stereo_pairs(samples) #filelist: 이미지 경로 리스트 2n개, pairs: 이미지 쌍의 리스트 n개
-    
+    focal_total = []
+    pose_total = []
+    sparse_pts3d_total = []
+    dense_pts3d_total = []
+    depthmaps_total = []
+    confs_total = []
+    for filelist, pairs in zip(filelist_total, pairs_total):
+        scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
+                                        model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
+                                        opt_depth = 'depth' in optim_level, shared_intrinsics = shared_intrinsics,
+                                        matching_conf_thr = matching_conf_thr)
+        focal = scene.get_focals().cpu()
+        pose = scene.get_im_poses().cpu()
+        sparse_pts3d = scene.get_sparse_pts3d()
+        dense_pts3d, depthmaps, confs = scene.get_dense_pts3d(clean_depth = True)
+        focal_total.append(focal)
+        pose_total.append(pose)
+        sparse_pts3d_total.append(sparse_pts3d)
+        dense_pts3d_total.append(dense_pts3d)
+        depthmaps_total.append(depthmaps)
+        confs_total.append(confs)
+
     breakpoint()
-    scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
-                                    model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
-                                    opt_depth = 'depth' in optim_level, shared_intrinsics = shared_intrinsics,
-                                    matching_conf_thr = matching_conf_thr)
-    
+
+    # get flow
+    left_imgs, right_imgs = make_flow_image_lists(samples)
+    breakpoint()
+    (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask) = get_flow(left_imgs, right_imgs)
+    breakpoint()
+
     
     return
