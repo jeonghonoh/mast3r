@@ -10,7 +10,7 @@ import torch
 import tempfile
 from contextlib import nullcontext
 
-from mast3r.demo import get_args_parser, main_demo
+from mast3r.demo import get_args_parser, main_demo, forward_two_images
 
 from mast3r.model import AsymmetricMASt3R
 from mast3r.utils.misc import hash_md5
@@ -27,25 +27,39 @@ if __name__ == '__main__':
     parser = get_args_parser()
     args = parser.parse_args()
     set_print_with_timestamp()
+    
+    ORIGINAL_CODE = True
+    if ORIGINAL_CODE:
+        if args.server_name is not None:
+            server_name = args.server_name
+        else:
+            server_name = '0.0.0.0' if args.local_network else '127.0.0.1'
 
-    if args.server_name is not None:
-        server_name = args.server_name
+        if args.weights is not None:
+            weights_path = args.weights
+        else:
+            weights_path = "naver/" + args.model_name
+
+        model = AsymmetricMASt3R.from_pretrained(weights_path).to(args.device)
+        chkpt_tag = hash_md5(weights_path)
+
+        def get_context(tmp_dir):
+            return tempfile.TemporaryDirectory(suffix='_mast3r_gradio_demo') if tmp_dir is None \
+                else nullcontext(tmp_dir)
+        with get_context(args.tmp_dir) as tmpdirname:
+            cache_path = os.path.join(tmpdirname, chkpt_tag)
+            os.makedirs(cache_path, exist_ok=True)
+            main_demo(cache_path, model, args.device, args.image_size, server_name, args.server_port, silent=args.silent,
+                    share=args.share, gradio_delete_cache=args.gradio_delete_cache)
+
     else:
-        server_name = '0.0.0.0' if args.local_network else '127.0.0.1'
-
-    if args.weights is not None:
-        weights_path = args.weights
-    else:
-        weights_path = "naver/" + args.model_name
-
-    model = AsymmetricMASt3R.from_pretrained(weights_path).to(args.device)
-    chkpt_tag = hash_md5(weights_path)
-
-    def get_context(tmp_dir):
-        return tempfile.TemporaryDirectory(suffix='_mast3r_gradio_demo') if tmp_dir is None \
-            else nullcontext(tmp_dir)
-    with get_context(args.tmp_dir) as tmpdirname:
-        cache_path = os.path.join(tmpdirname, chkpt_tag)
-        os.makedirs(cache_path, exist_ok=True)
-        main_demo(cache_path, model, args.device, args.image_size, server_name, args.server_port, silent=args.silent,
-                  share=args.share, gradio_delete_cache=args.gradio_delete_cache)
+        #args: (local_network=False, server_name=None, image_size=512, server_port=None, weights=None, model_name='MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric', device='cuda', tmp_dir=None, silent=False, share=True, gradio_delete_cache=None, data_path='/workspace/data/jeonghonoh/dataset/dynamic/dual_arm/seq_01')    
+        if args.weights is not None:
+            weights_path = args.weights
+        else:
+            weights_path = "naver/" + args.model_name
+        model = AsymmetricMASt3R.from_pretrained(weights_path).to(args.device)
+        breakpoint()
+        forward_two_images(data_path = args.data_path, model = model, device = args.device, image_size=args.image_size, silent=False)
+        
+    

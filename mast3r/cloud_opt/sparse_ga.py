@@ -127,19 +127,23 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
         lora_depth: smart dimensionality reduction with depthmaps
     """
     # Convert pair naming convention from dust3r to mast3r
+    # breakpoint()
     pairs_in = convert_dust3r_pairs_naming(imgs, pairs_in)
+    #'instance'가 int에서 file path로 바뀌었음
+    breakpoint()
     # forward pass
     pairs, cache_path = forward_mast3r(pairs_in, model,
                                        cache_path=cache_path, subsample=subsample,
                                        desc_conf=desc_conf, device=device)
+    breakpoint()
 
     # extract canonical pointmaps
     tmp_pairs, pairwise_scores, canonical_views, canonical_paths, preds_21 = \
         prepare_canonical_data(imgs, pairs, subsample, cache_path=cache_path, mode='avg-angle', device=device)
-
+    breakpoint()
     # compute minimal spanning tree
     mst = compute_min_spanning_tree(pairwise_scores)
-
+    breakpoint()
     # remove all edges not in the spanning tree?
     # min_spanning_tree = {(imgs[i],imgs[j]) for i,j in mst[1]}
     # tmp_pairs = {(a,b):v for (a,b),v in tmp_pairs.items() if {(a,b),(b,a)} & min_spanning_tree}
@@ -147,11 +151,11 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
     # smartly combine all useful data
     imsizes, pps, base_focals, core_depth, anchors, corres, corres2d, preds_21 = \
         condense_data(imgs, tmp_pairs, canonical_views, preds_21, dtype)
-
+    breakpoint()
     imgs, res_coarse, res_fine = sparse_scene_optimizer(
         imgs, subsample, imsizes, pps, base_focals, core_depth, anchors, corres, corres2d, preds_21, canonical_paths, mst,
         shared_intrinsics=shared_intrinsics, cache_path=cache_path, device=device, dtype=dtype, **kw)
-
+    breakpoint()
     return SparseGA(imgs, pairs_in, res_fine or res_coarse, anchors, canonical_paths)
 
 

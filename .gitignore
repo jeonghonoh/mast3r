@@ -127,3 +127,21 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Ignore unnecessary files
+__pycache__/
+.vscode/
+.idea/
+.DS_Store
+
+# Large files
+*.log
+*.h5
+*.ckpt
+*.pth
+*.tar
+*.gz
+*.zip
+*.mp4
+cache/
+checkpoints/

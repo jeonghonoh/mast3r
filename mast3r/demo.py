@@ -49,10 +49,11 @@ class SparseGAState():
 
 def get_args_parser():
     parser = dust3r_get_args_parser()
-    parser.add_argument('--share', action='store_true')
+    parser.add_argument('--share', action='store_true', default=True)
     parser.add_argument('--gradio_delete_cache', default=None, type=int,
                         help='age/frequency at which gradio removes the file. If >0, matching cache is purged')
-
+    parser.add_argument('--data_path', default="/workspace/data/jeonghonoh/dataset/dynamic/dual_arm/seq_01", type=str)
+    
     actions = parser._actions
     for action in actions:
         if action.dest == 'model_name':
@@ -158,7 +159,9 @@ def get_reconstructed_scene(outdir, gradio_delete_cache, model, device, silent, 
     if scenegraph_type in ["swin", "logwin"] and not win_cyclic:
         scene_graph_params.append('noncyclic')
     scene_graph = '-'.join(scene_graph_params)
+    # breakpoint()
     pairs = make_pairs(imgs, scene_graph=scene_graph, prefilter=None, symmetrize=True)
+    # breakpoint()
     if optim_level == 'coarse':
         niter2 = 0
     # Sparse GA (forward mast3r -> matching -> 3D optim -> 2D refinement -> triangulation)
@@ -171,10 +174,12 @@ def get_reconstructed_scene(outdir, gradio_delete_cache, model, device, silent, 
     else:
         cache_dir = os.path.join(outdir, 'cache')
     os.makedirs(cache_dir, exist_ok=True)
+    # breakpoint()
     scene = sparse_global_alignment(filelist, pairs, cache_dir,
                                     model, lr1=lr1, niter1=niter1, lr2=lr2, niter2=niter2, device=device,
                                     opt_depth='depth' in optim_level, shared_intrinsics=shared_intrinsics,
                                     matching_conf_thr=matching_conf_thr, **kw)
+    # breakpoint()
     if current_scene_state is not None and \
         not current_scene_state.should_delete and \
             current_scene_state.outfile_name is not None:
@@ -329,3 +334,229 @@ def main_demo(tmpdirname, model, device, image_size, server_name, server_port, s
                                             clean_depth, transparent_cams, cam_size, TSDF_thresh],
                                     outputs=outmodel)
     demo.launch(share=share, server_name=server_name, server_port=server_port)
+
+import json
+import yaml
+import PIL.Image
+import torchvision.transforms as tvf
+from PIL.ImageOps import exif_transpose
+from dust3r.utils.image import _resize_pil_image
+
+ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+
+def load_stereo_data(folder_path, size, square_ok=False, verbose=True):
+    """ open and convert all images in a list or folder to proper input format for DUSt3R
+    """
+    if isinstance(folder_path, str):
+        if verbose:
+            print(f'>> Loading images from {folder_path}')
+        # root, folder_content = folder_or_list, sorted(os.listdir(folder_or_list))
+        # left_root, right_root, left_content, right_content = \
+        #     os.path.join(folder_or_list, "left"), os.path.join(folder_or_list, "right"), sorted(os.listdir(os.path.join(folder_or_list, "left"))), sorted(os.listdir(os.path.join(folder_or_list, "right")))
+        left_calib_path, right_calib_path = os.path.join(folder_path, "calibration_03.yaml"), os.path.join(folder_path, "calibration_02.yaml")
+        metadata_path = os.path.join(folder_path, "metadata.json")
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+    else:
+        raise ValueError(f'bad {folder_path=} ({type(folder_path)})')
+
+    #load calibration data, calibration_03.yaml
+    with open(left_calib_path, 'r') as f:
+        left_calib_data = yaml.safe_load(f)
+    left_intrinsic = np.array([[left_calib_data['fx'], left_calib_data['skew'], left_calib_data['cx']],
+                               [0, left_calib_data['fy'], left_calib_data['cy']],
+                               [0, 0, 1]])
+    with open(right_calib_path, 'r') as f:
+        right_calib_data = yaml.safe_load(f)
+    right_intrinsic = np.array([[right_calib_data['fx'], right_calib_data['skew'], right_calib_data['cx']],
+                                [0, right_calib_data['fy'], right_calib_data['cy']],
+                                [0, 0, 1]])
+    if verbose:
+        print(f'Loaded calibration data from {left_calib_path} and {right_calib_path}')
+        print(f'Left intrinsic matrix: {left_intrinsic}')
+        print(f'Right intrinsic matrix: {right_intrinsic}')
+    
+    samples = []
+    for entry in metadata:
+        # Extract paths from metadata
+        left_img_rel = entry["image_left"]
+        right_img_rel = entry["image_right"]
+        left_depth_rel = entry["depth_left"]
+        right_depth_rel = entry["depth_right"]
+        left_pose_rel = entry["pose_left"]
+        right_pose_rel = entry["pose_right"]
+    
+        # Build full paths
+        left_img_path = os.path.join(folder_path, left_img_rel)
+        right_img_path = os.path.join(folder_path, right_img_rel)
+        left_depth_path = os.path.join(folder_path, left_depth_rel)
+        right_depth_path = os.path.join(folder_path, right_depth_rel)
+        left_pose_path = os.path.join(folder_path, left_pose_rel)
+        right_pose_path = os.path.join(folder_path, right_pose_rel)
+        
+        # Load left/right images with PIL
+        left_img = PIL.Image.open(left_img_path).convert('RGB')
+        right_img = PIL.Image.open(right_img_path).convert('RGB')
+        assert left_img.size == right_img.size, f'original: left and right images must have the same size'
+        
+        W_origin, H_origin = left_img.size
+        
+        if size == 512:
+            # resize long side to 512
+            left_img = _resize_pil_image(left_img, size)
+            right_img = _resize_pil_image(right_img, size)
+        else:
+            print(f"Unsupported size: {size}")
+            return None
+        assert left_img.size == right_img.size, f'modified: left and right images must have the same size'
+        
+        W_resize, H_resize = left_img.size
+        cx, cy = W_resize//2, H_resize//2
+        halfw, halfh = ((2*cx)//16)*8, ((2*cy)//16)*8
+        left_img = left_img.crop((cx-halfw, cy-halfh, cx+halfw, cy+halfh))
+        right_img = right_img.crop((cx-halfw, cy-halfh, cx+halfw, cy+halfh))
+        assert left_img.size == right_img.size, f'cropped: left and right images must have the same size'
+        
+        W, H = left_img.size
+        if verbose and entry.get("sample_number", None) % 100 == 0:
+            print(f' - adding {left_img_rel} and {right_img_rel} with resolution {W_origin}x{H_origin} --> {W_resize}x{H_resize} --> {W}x{H}')
+        
+        #intrinsic matrix for modified images
+        #original -> resize
+        scale_w = W_resize / W_origin
+        scale_h = H_resize / H_origin
+        left_intrinsic_modified = left_intrinsic.copy()
+        right_intrinsic_modified = right_intrinsic.copy()
+        left_intrinsic_modified[0, 0] *= scale_w
+        left_intrinsic_modified[0, 2] *= scale_w
+        left_intrinsic_modified[1, 1] *= scale_h
+        left_intrinsic_modified[1, 2] *= scale_h
+        left_intrinsic_modified[0, 1] *= scale_w #skew
+        right_intrinsic_modified[0, 0] *= scale_w
+        right_intrinsic_modified[0, 2] *= scale_w
+        right_intrinsic_modified[1, 1] *= scale_h
+        right_intrinsic_modified[1, 2] *= scale_h
+        right_intrinsic_modified[0, 1] *= scale_w
+        #resize -> crop
+        crop_w = cx - halfw
+        crop_h = cy - halfh
+        left_intrinsic_modified[0, 2] -= crop_w
+        left_intrinsic_modified[1, 2] -= crop_h
+        right_intrinsic_modified[0, 2] -= crop_w
+        right_intrinsic_modified[1, 2] -= crop_h
+        
+        # Load depth images (assuming they are also image files)
+        # If the depth is stored in 16-bit PNG or similar, you may need to handle that differently
+        left_depth_img = PIL.Image.open(left_depth_path)
+        right_depth_img = PIL.Image.open(right_depth_path)
+        
+        # Convert depth to np.array for easier handling
+        left_depth = np.array(left_depth_img)
+        right_depth = np.array(right_depth_img)
+        
+        # Load pose file and convert its content to a numpy array
+        with open(left_pose_path, "r") as f:
+            # Read all lines from the file
+            lines = f.readlines()
+            # Convert each line into a list of floats and build a 2D numpy array
+            left_pose = np.array([list(map(float, line.split())) for line in lines])
+
+        with open(right_pose_path, "r") as f:
+            lines = f.readlines()
+            right_pose = np.array([list(map(float, line.split())) for line in lines])
+            
+        # Collect all data in a dictionary
+        sample = {
+            "sample_number": entry.get("sample_number", None),
+            "timestamp": entry.get("timestamp", None),
+            "left_img_path": left_img_path, # str
+            "right_img_path": right_img_path, # str
+            "left_img": left_img,           # PIL Image
+            "right_img": right_img,         # PIL Image
+            "left_depth": left_depth,   # numpy array
+            "right_depth": right_depth, # numpy array
+            "left_pose": left_pose,    # raw text
+            "right_pose": right_pose,  # raw text
+            "left_intrinsic": left_intrinsic_modified, # numpy array
+            "right_intrinsic": right_intrinsic_modified, # numpy array
+            "image_left_timestamp": entry.get("image_left_timestamp", None),
+            "image_right_timestamp": entry.get("image_right_timestamp", None),
+            "depth_left_timestamp": entry.get("depth_left_timestamp", None),
+            "depth_right_timestamp": entry.get("depth_right_timestamp", None),
+            "pose_left_timestamp": entry.get("pose_left_timestamp", None),
+            "pose_right_timestamp": entry.get("pose_right_timestamp", None),
+            "max_sync_error": entry.get("max_sync_error", None)
+        }
+        
+        samples.append(sample)
+
+        if verbose and entry.get("sample_number", None) % 100 == 0:
+            print(f"Loaded sample ~{entry.get('sample_number', '?')}")
+
+    if verbose:
+        print(f"Total samples loaded: {len(samples)}")
+    return samples 
+    
+
+def make_stereo_pairs(samples):
+    filelist = []
+    imgs = []
+    # {'img': tensor형식, 'true_shape': array([[288, 512]], dtype=int32), 'idx': 1, 'instance': '1'}
+    #imgs.append(dict(img=ImgNorm(img)[None], true_shape=np.int32(
+            # [img.size[::-1]]), idx=len(imgs), instance=str(len(imgs))))
+    pairs = [] #tuple의 리스트
+    for sample in samples:
+        left_img = sample["left_img"]
+        right_img = sample["right_img"]
+        left_dict = dict(img=ImgNorm(left_img)[None], true_shape=np.int32([left_img.size[::-1]]), idx=len(imgs), instance=str(len(imgs)))
+        imgs.append(left_dict)
+        right_dict = dict(img=ImgNorm(right_img)[None], true_shape=np.int32([right_img.size[::-1]]), idx=len(imgs), instance=str(len(imgs)))
+        imgs.append(right_dict)
+
+        filelist.append(sample["left_img_path"])
+        filelist.append(sample["right_img_path"])
+        
+        pairs.append((left_dict, right_dict))
+    
+    return filelist, pairs
+    
+    
+    
+
+# def forward_two_images(data_path, outdir, gradio_delete_cache, model, device, silent, image_size, current_scene_state,
+#                             filelist, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
+#                             as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size, scenegraph_type, winsize,
+#                             win_cyclic, refid, TSDF_thresh, shared_intrinsics, **kw):
+def forward_two_images(data_path, model, device, image_size = 512, silent = False):
+    
+    # scene, inputfiles, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
+    # as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size,
+    # scenegraph_type, winsize, win_cyclic, refid, TSDF_thresh, shared_intrinsics
+    
+    cache_dir = os.path.join('/workspace/data/jeonghonoh/mast3r/', 'cache')
+    if not os.path.isdir(cache_dir):
+        os.makedirs(cache_dir, exist_ok=True)
+    optim_level = 'refine+depth'
+    lr1 = 0.07
+    niter1 = 500
+    lr2 = 0.014
+    niter2 = 200
+    matching_conf_thr = 5.
+    shared_intrinsics = False
+    if optim_level == 'coarse':
+        niter2 = 0
+    
+    samples = load_stereo_data(data_path, size=image_size, verbose=not silent)
+    
+    # breakpoint()
+    filelist, pairs = make_stereo_pairs(samples) #filelist: 이미지 경로 리스트 2n개, pairs: 이미지 쌍의 리스트 n개
+    
+    breakpoint()
+    scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
+                                    model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
+                                    opt_depth = 'depth' in optim_level, shared_intrinsics = shared_intrinsics,
+                                    matching_conf_thr = matching_conf_thr)
+    
+    
+    return
