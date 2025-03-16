@@ -82,7 +82,7 @@ class SparseGA():
             pixels = torch.from_numpy(np.mgrid[:W, :H].T.reshape(-1, 2)).float().to(device)
             idxs, offsets = anchor_depth_offsets(canon2, {i: (pixels, None)}, subsample=subsample)
             anchors[i] = (pixels, idxs[i], offsets[i])
-
+        # breakpoint()
         # densify sparse depthmaps
         pts3d, depthmaps = make_pts3d(anchors, self.intrinsics, self.cam2w, [
                                       d.ravel() for d in self.depthmaps], base_focals=base_focals, ret_depth=True)

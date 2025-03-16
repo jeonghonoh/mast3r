@@ -344,7 +344,7 @@ from dust3r.utils.image import _resize_pil_image
 
 ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-def load_stereo_data(folder_path, srt_frame, end_frame, size, square_ok=False, verbose=True, debug_mode=False):
+def load_stereo_data(folder_path, srt_frame, end_frame, size, square_ok=False, verbose=True):
     """ open and convert all images in a list or folder to proper input format for DUSt3R
     """
     if isinstance(folder_path, str):
@@ -548,17 +548,14 @@ def make_stereo_pairs(samples, symmetrize=True):
         pairs_total.append(pairs)
 
     return filelist_total, pairs_total
-    
 
+#raft_ws  
+import cv2
 import torch
 from tqdm import tqdm
 from third_party.raft import load_RAFT
 from dust3r.utils.geom_opt import OccMask
-
-# 예시 사용법:
-# samples = load_stereo_data(data_path, srt_frame, end_frame, size=512, verbose=True)
-# left_imgs, right_imgs = make_flow_image_lists(samples)
-# flow_left, flow_right, valid_mask_left, valid_mask_right = get_flow(left_imgs, right_imgs)
+from third_party.RAFT.core.utils.flow_viz import flow_to_image
 def make_flow_image_lists(samples):
     """
     Given a list of samples (from load_stereo_data), extract left and right images
@@ -610,7 +607,7 @@ def get_flow(left_imgs: list, right_imgs: list, model_path="third_party/RAFT/mod
     flow_net = flow_net.to(device)
     flow_net.eval()
     
-    def compute_flow_seq(img_seq):
+    def compute_flow_seq(img_seq : torch.Tensor): # (N, H, W, C)
         """ Compute forward and backward flow between consecutive frames in a sequence. """
         flows_forward = []
         flows_backward = []
@@ -650,51 +647,146 @@ def get_flow(left_imgs: list, right_imgs: list, model_path="third_party/RAFT/mod
     return (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask)
 
 
+# for idx, (i, j) in enumerate(symmetry_pairs_idx):
+    # dynamic_mask_1, dynamic_mask_2 = self.find_dynamic_mask_using_pts3d(self.pointmap_i[idx], self.pointmap_j[idx], self.flow_ij[idx], self.flow_ji[idx], normalize=True)
+    # i_idx = self._ei[i]
+    # j_idx = self._ej[i]
+    # self.dynamic_masks[i_idx].append(dynamic_mask_1)
+    # self.dynamic_masks[j_idx].append(dynamic_mask_2)
+# (Pdb) self.flow_ij.shape
+# torch.Size([90, 2, 512, 272])
+# (Pdb) self.flow_ji.shape
+# torch.Size([90, 2, 512, 272])
+# (Pdb) self.flow_valid_mask_i.shape
+# torch.Size([90, 1, 512, 272])
 
-# def get_flow(left_imgs: list, right_imgs: list):
-#     print('precomputing flow...')
-#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-#     get_valid_flow_mask = OccMask(th=3.0)
-#     # pair_imgs : [(num, W, H, 3), (num, W, H, 3)]
-#     # (90, 512, 272, 3)
-#     # pair_imgs = [np.stack(self.imgs)[self._ei], np.stack(self.imgs)[self._ej]]
+def find_dynamic_mask_using_pts3d(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, flow_12: torch.Tensor, flow_21: torch.Tensor, valid: torch.Tensor, thres=0.1, normalize=True):
+        """
+        find the dynamic points in the 3d space using the flow as dense correspondence
+        
+        두 이미지(view1, view2)에 대한 3D 포인트 맵(pts3d_1, pts3d_2)과
+        view1 -> view2 방향 흐름(flow_12), view2 -> view1 방향 흐름(flow_21)을 이용해
+        일정값 이상 차이가 나는 지점을 dynamic으로 간주하여 마스크를 반환한다.
+
+        Args:
+            pts3d_1 (torch.Tensor): (H, W, 3) 형태, 첫 번째 뷰의 3D 포인트 맵
+            pts3d_2 (torch.Tensor): (H, W, 3) 형태, 두 번째 뷰의 3D 포인트 맵
+            flow_12 (torch.Tensor): (2, H, W) 형태, view1 -> view2의 흐름
+            flow_21 (torch.Tensor): (2, H, W) 형태, view2 -> view1의 흐름
+            valid (torch.Tensor): (1, H, W) 형태, occmask에 의해 판단된 valid mask
+            thres (float): 동적 포인트 판단 임계값
+            normalize (bool): True일 경우, 평균과 표준편차를 이용해 동적 포인트 비율을 출력
+
+        Returns:
+            dynamic_mask_1 (torch.BoolTensor): (H, W) 형태, view1에서 동적으로 판단된 픽셀 마스크
+            dynamic_mask_2 (torch.BoolTensor): (H, W) 형태, view2에서 동적으로 판단된 픽셀 마스크
+        """
+        assert pts3d_1.shape == pts3d_2.shape, 'shape mismatch(pts3d_1, pts3d_2)'
+        assert flow_12.shape == flow_21.shape, 'shape mismatch(flow_12, flow_21)'
+        H, W, _ = pts3d_1.shape
+        device = flow_12.device
+        
+        dynamic_mask_1 = torch.zeros((H, W), dtype=torch.bool, device=device)
+        dynamic_mask_2 = torch.zeros((H, W), dtype=torch.bool, device=device)
+        
+        coords_1 = torch.stack(torch.meshgrid(torch.arange(H, device = device), torch.arange(W, device = device)), dim=-1).float()
+        moved_coords_1 = torch.round(coords_1 + flow_12.permute(1, 2, 0)).long()
+        # breakpoint()
+        # only consider the points that are within the image
+        valid_mask = ((moved_coords_1[..., 0] >= 0) & (moved_coords_1[..., 0] < H) & (moved_coords_1[..., 1] >= 0) & (moved_coords_1[..., 1] < W))
+        # valid_mask가 True인 좌표의 (y, x) 인덱스
+        # shape: (N, 2)
+        valid_idxs = valid_mask.nonzero(as_tuple=False)
+        # moved_coords_1_int에서 valid 영역만 뽑은 것
+        valid_moved_coords = moved_coords_1[valid_mask]  # (N, 2)
+        # breakpoint()
+        # 유효한 좌표들에 대해 3D 포인트를 한 번에 조회
+        # pts3d_1_valid: view1에서 valid 픽셀의 3D 포인트
+        # pts3d_2_valid: view2에서 valid 픽셀의 3D 포인트(흐름에 따라 이동한 좌표)
+        pts3d_1_valid = pts3d_1[valid_idxs[:, 0], valid_idxs[:, 1]]  # shape: (N, 3)
+        pts3d_2_valid = pts3d_2[valid_moved_coords[:, 0], valid_moved_coords[:, 1]]  # shape: (N, 3)
+        dist = torch.norm(pts3d_2_valid - pts3d_1_valid, dim=-1)
+        # breakpoint()
+        if normalize:
+            mean = dist.mean()
+            std = dist.std()
+            too_big_mask = (dist > mean + 1.5*std)
+            print(f'mean: {mean}, std: {std}, dynamic points: {too_big_mask.sum()/dist.size(0) * 100:.2f}%')
+        else:
+            too_big_mask = (dist > thres)
+        
+        dynamic_idxs_1 = valid_idxs[too_big_mask]
+        dynamic_idxs_2 = valid_moved_coords[too_big_mask]
+        
+        dynamic_mask_1[dynamic_idxs_1[:, 0], dynamic_idxs_1[:, 1]] = True
+        dynamic_mask_2[dynamic_idxs_2[:, 0], dynamic_idxs_2[:, 1]] = True
+        
+        # tmp_data = []
+        # cnt = 0
+        # for i in range(H):
+        #     for j in range(W):
+        #         if moved_coords_1[i, j, 0] >= 0 and moved_coords_1[i, j, 0] < H and moved_coords_1[i, j, 1] >= 0 and moved_coords_1[i, j, 1] < W:
+        #             # if torch.norm(pts3d_2[int(moved_coords_1[i, j, 0]), int(moved_coords_1[i, j, 1])] - pts3d_1[i, j]) > thres:
+        #             #     dynamic_mask_1[i, j] = True
+        #             #     dynamic_mask_2[int(moved_coords_1[i, j, 0]), int(moved_coords_1[i, j, 1])] = True
+        #             tmp_data.append(torch.norm(pts3d_2[int(moved_coords_1[i, j, 0]), int(moved_coords_1[i, j, 1])] - pts3d_1[i, j]))
+        #         else:
+        #             cnt += 1
+        
+        # breakpoint()
+        
+        return dynamic_mask_1, dynamic_mask_2
+
+
+# flowformer_ws
+from third_party.FlowFormerPlusPlus.visualize_flow import forward_flowformer, visualize_flow, generate_pairs, build_model
+def flowformer_pairs(samples: list):
+    """
+    Given a list of samples (from load_stereo_data), extract left and right images
+    as numpy arrays suitable for optical flow computation.
     
-
-#     flow_net = load_RAFT("third_party/RAFT/models/Tartan-C-T-TSKH-spring540x960-M.pth")
-#     flow_net = flow_net.to(device)
-#     flow_net.eval()
-
-#     with torch.no_grad():
-#         chunk_size = 12
-#         flow_ij = []
-#         flow_ji = []
-#         num_pairs = len(pair_imgs[0])
-#         for i in tqdm(range(0, num_pairs, chunk_size)):
-#             end_idx = min(i + chunk_size, num_pairs)
-#             imgs_ij = [torch.tensor(pair_imgs[0][i:end_idx]).float().to(device),
-#                     torch.tensor(pair_imgs[1][i:end_idx]).float().to(device)]
-#             flow_ij.append(flow_net(imgs_ij[0].permute(0, 3, 1, 2) * 255, 
-#                                     imgs_ij[1].permute(0, 3, 1, 2) * 255, 
-#                                     iters=20, test_mode=True)[1])
-#             flow_ji.append(flow_net(imgs_ij[1].permute(0, 3, 1, 2) * 255, 
-#                                     imgs_ij[0].permute(0, 3, 1, 2) * 255, 
-#                                     iters=20, test_mode=True)[1])
-
-#         flow_ij = torch.cat(flow_ij, dim=0)
-#         flow_ji = torch.cat(flow_ji, dim=0)
-#         valid_mask_i = get_valid_flow_mask(flow_ij, flow_ji)
-#         valid_mask_j = get_valid_flow_mask(flow_ji, flow_ij)
-#     print('flow precomputed')
-#     # delete the flow net
-#     if flow_net is not None: del flow_net
-#     return flow_ij, flow_ji, valid_mask_i, valid_mask_j
+    Each sample is expected to have the following keys:
+      - "left_img": PIL Image for left view.
+      - "right_img": PIL Image for right view.
     
+    Returns:
+      left_img_pairs: list of tuple, (img1, img2)
+      right_img_pairs: list of tuple, (img1, img2)
+    """
+    left_img_lst = []
+    right_img_lst = []
+    left_file_name_lst = []
+    right_file_name_lst = []
+
+    for sample in samples:
+        left_img_lst.append(sample["left_img"])
+        right_img_lst.append(sample["right_img"])
+        #sample["left_img_path"]: /workspace/data/jeonghonoh/dataset/dynamic/dual_arm/seq_01/images/left/0070_left.png
+        #마지막 파일명만 리스트에 넣기
+        left_file_name_lst.append(sample["left_img_path"].split('/')[-1])
+        right_file_name_lst.append(sample["right_img_path"].split('/')[-1])
+        # breakpoint()
+
+    left_img_pairs = []
+    right_img_pairs = []
+    left_file_name = []
+    right_file_name = []
+    # tuple
+    for i in range(len(left_img_lst) - 1):
+        left_img_pairs.append((left_img_lst[i], left_img_lst[i+1]))
+        right_img_pairs.append((right_img_lst[i], right_img_lst[i+1]))
+        left_file_name.append((left_file_name_lst[i], left_file_name_lst[i+1]))
+        right_file_name.append((right_file_name_lst[i], right_file_name_lst[i+1]))
+
+    return (left_file_name, right_file_name), (left_img_pairs, right_img_pairs)
+
+
 
 # def forward_two_images(data_path, outdir, gradio_delete_cache, model, device, silent, image_size, current_scene_state,
 #                             filelist, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
 #                             as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size, scenegraph_type, winsize,
 #                             win_cyclic, refid, TSDF_thresh, shared_intrinsics, **kw):
-def forward_two_images(data_path, srt_frame, end_frame, model, device, image_size = 512, silent = False):
+def forward_two_images(data_path, srt_frame, end_frame, model, device, image_size = 512, silent = False, seq = 'seq_01'):
     # scene, inputfiles, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
     # as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size,
     # scenegraph_type, winsize, win_cyclic, refid, TSDF_thresh, shared_intrinsics
@@ -716,7 +808,30 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     # breakpoint()
     filelist_total, pairs_total = make_stereo_pairs(samples) #filelist: 이미지 경로 리스트 2n개, pairs: 이미지 쌍의 리스트 n개
     
+    # get flow (FlowFormer++)
+    flowformer_model = build_model()
+    #img_pairs: list of tuple, (PIL Image, PIL Image)
+    (ff_left_file_name, ff_right_file_name), (ff_left_img_pairs, ff_right_img_pairs) = flowformer_pairs(samples)
     # breakpoint()
+    with torch.no_grad():
+        debug_mode = True
+        # visualize_flow('.', 'viz_results/', flowformer_model, ff_img_pairs, keep_size = True)
+        left_forward_flows, left_backward_flows, right_forward_flows, right_backward_flows, left_names, right_names = forward_flowformer(flowformer_model, ff_left_file_name, ff_right_file_name, ff_left_img_pairs, ff_right_img_pairs, keep_size = True, debug_mode = debug_mode, seq = seq)
+        # valid using OccMask
+        get_valid_flow_mask = OccMask(th=3.0)
+        left_valid_masks = []
+        right_valid_masks = []
+        for left_forward_flow, left_backward_flow in zip(left_forward_flows, left_backward_flows):
+            # (H, W, 2) -> (B, 2, H, W)
+            left_valid_mask = get_valid_flow_mask(left_forward_flow.unsqueeze(0).permute(0, 3, 1, 2), left_backward_flow.unsqueeze(0).permute(0, 3, 1, 2))
+            left_valid_masks.append(left_valid_mask)
+        for right_forward_flow, right_backward_flow in zip(right_forward_flows, right_backward_flows):
+            right_valid_mask = get_valid_flow_mask(right_forward_flow.unsqueeze(0).permute(0, 3, 1, 2), right_backward_flow.unsqueeze(0).permute(0, 3, 1, 2))
+            right_valid_masks.append(right_valid_mask)
+
+    # breakpoint() #check: left_valid_mask, right_valid_mask ratio (0.85~0.95)
+
+
     focal_total = []
     pose_total = []
     sparse_pts3d_total = []
@@ -738,14 +853,103 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
         dense_pts3d_total.append(dense_pts3d)
         depthmaps_total.append(depthmaps)
         confs_total.append(confs)
+    # breakpoint()
 
+    assert len(dense_pts3d_total) == (len(left_forward_flows) + 1)
+
+    #dynamic mask
+    debug_mode = True
+    for idx, (dense_pts3d, left_forward_flow, left_backward_flow, left_valid) in enumerate(zip(dense_pts3d_total, left_forward_flows, left_backward_flows, left_valid_masks)):
+        # dense_pts3d: list of torch.Tensor, 2 of (H * W, 3) -> (H, W, 3)
+        # left_forward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
+        # left_backward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
+        # left_valid: torch.Tensor, (1, 1, W, H) -> (1, H, W)
+        H, W, _ = left_forward_flow.shape
+        # breakpoint() #device check
+        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(dense_pts3d[0].reshape(H, W, 3), dense_pts3d[1].reshape(H, W, 3), left_forward_flow.permute(2, 0, 1), left_backward_flow.permute(2, 0, 1), left_valid.squeeze(0).permute(0, 2, 1), normalize=True)
+        if debug_mode:
+            #save dynamic mask
+            mask_output_path = os.path.join('/workspace/data/jeonghonoh/mast3r/output', seq, 'dynamic_mask')
+            os.makedirs(mask_output_path, exist_ok=True)
+            left_mask_path = os.path.join(mask_output_path, 'left')
+            os.makedirs(left_mask_path, exist_ok=True)
+
+            # dynamic_mask_1.device: cuda:0
+            dynamic_mask_1 = dynamic_mask_1.cpu().numpy().astype(np.uint8) * 255
+            dynamic_mask_2 = dynamic_mask_2.cpu().numpy().astype(np.uint8) * 255
+            cv2.imwrite(os.path.join(left_mask_path, f'{0}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
+            cv2.imwrite(os.path.join(left_mask_path, f'{1}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
+
+
+    for idx, (dense_pts3d, right_forward_flow, right_backward_flow, right_valid) in enumerate(zip(dense_pts3d_total, right_forward_flows, right_backward_flows, right_valid_masks)):
+        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(dense_pts3d[0].reshape(H, W, 3), dense_pts3d[1].reshape(H, W, 3), right_forward_flow.permute(2, 0, 1), right_backward_flow.permute(2, 0, 1), right_valid.squeeze(0).permute(0, 2, 1), normalize=True)
+        if debug_mode:
+            right_mask_path = os.path.join(mask_output_path, 'right')
+            os.makedirs(right_mask_path, exist_ok=True)
+            dynamic_mask_1 = dynamic_mask_1.cpu().numpy().astype(np.uint8) * 255
+            dynamic_mask_2 = dynamic_mask_2.cpu().numpy().astype(np.uint8) * 255
+            cv2.imwrite(os.path.join(right_mask_path, f'{0}_{right_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
+            cv2.imwrite(os.path.join(right_mask_path, f'{1}_{right_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
+
+
+
+
+    # # get flow (RAFT)
+    # # list of images, each of shape: (288, 512, 3)
+    # left_imgs, right_imgs = make_flow_image_lists(samples)
+    # # (num - 1, 2, 288, 512)
+    # (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask) = get_flow(left_imgs, right_imgs)
+    # # breakpoint()
+    # debug_mode = True
+    # if debug_mode:
+    #     #save every images, flows
+    #     output_save_path = '/workspace/data/jeonghonoh/mast3r/output'
+    #     os.makedirs(output_save_path, exist_ok=True)
+    #     img_path = os.path.join(output_save_path, seq, 'images')
+    #     os.makedirs(img_path, exist_ok=True)
+    #     flow_path = os.path.join(output_save_path, seq, 'flows')
+    #     os.makedirs(flow_path, exist_ok=True)
+    #     flow_valid_path = os.path.join(output_save_path, seq, 'flow_valid')
+    #     os.makedirs(flow_valid_path, exist_ok=True)
+    #     img_path_left = os.path.join(img_path, 'left')
+    #     os.makedirs(img_path_left, exist_ok=True)
+    #     img_path_right = os.path.join(img_path, 'right')
+    #     os.makedirs(img_path_right, exist_ok=True)
+    #     flow_path_left = os.path.join(flow_path, 'left')
+    #     os.makedirs(flow_path_left, exist_ok=True)
+    #     flow_path_right = os.path.join(flow_path, 'right')
+    #     os.makedirs(flow_path_right, exist_ok=True)
+    #     flow_valid_path_left = os.path.join(flow_valid_path, 'left')
+    #     os.makedirs(flow_valid_path_left, exist_ok=True)
+    #     flow_valid_path_right = os.path.join(flow_valid_path, 'right')
+    #     os.makedirs(flow_valid_path_right, exist_ok=True)
+    #     sample_num_list = [sample["sample_number"] for sample in samples]
+    #     for sample_num, sample in zip(sample_num_list, samples):
+    #         left_img = sample["left_img"]
+    #         right_img = sample["right_img"]
+    #         left_img.save(os.path.join(img_path_left, f'{sample_num}_left.png'))
+    #         right_img.save(os.path.join(img_path_right, f'{sample_num}_right.png'))
+    #     for sample_num, (left_flow, right_flow) in zip(sample_num_list, zip(left_flow_forward, right_flow_forward)):
+    #         #flow: (2, 288, 512)
+    #         left_img = flow_to_image(left_flow.permute(1, 2, 0).cpu().numpy())
+    #         right_img = flow_to_image(right_flow.permute(1, 2, 0).cpu().numpy())
+    #         cv2.imwrite(os.path.join(flow_path_left, f'{sample_num}_left_flow.png'), left_img)
+    #         cv2.imwrite(os.path.join(flow_path_right, f'{sample_num}_right_flow.png'), right_img)
+    #     for sample_num, (left_valid, right_valid) in zip(sample_num_list, zip(left_valid_mask, right_valid_mask)):
+    #         #valid: (1, 288, 512)
+    #         left_img = np.squeeze(left_valid.cpu().numpy(), axis=0).astype(np.uint8) * 255
+    #         right_img = np.squeeze(right_valid.cpu().numpy(), axis=0).astype(np.uint8) * 255
+    #         cv2.imwrite(os.path.join(flow_valid_path_left, f'{sample_num}_left_valid.png'), left_img)
+    #         cv2.imwrite(os.path.join(flow_valid_path_right, f'{sample_num}_right_valid.png'), right_img)
+
+
+
+    
+    
     breakpoint()
 
-    # get flow
-    left_imgs, right_imgs = make_flow_image_lists(samples)
-    breakpoint()
-    (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask) = get_flow(left_imgs, right_imgs)
-    breakpoint()
+        
+
 
     
     return

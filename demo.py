@@ -67,10 +67,11 @@ if __name__ == '__main__':
 
         # seq_01 70~79 차 충돌, 120~129 공만 움직임, 300~304 휴지 and 공 멈춤, 306~313 휴지 움직임
         # seq_02 95~105 뷰 겹치는 멈춰있는거, 125~140 로봇팔 움직이는거 찍힌거 197~202 공만 움직임 290~293 차 충돌
+        seq = "seq_01"
+        srt_frame = 70
+        end_frame = 79
 
-        datapath = "/workspace/data/jeonghonoh/dataset/dynamic/dual_arm/seq_02"
-        srt_frame = 95
-        end_frame = 105
-
-        forward_two_images(data_path = datapath, srt_frame = srt_frame, end_frame = end_frame, model = model, device = args.device, image_size=args.image_size, silent=False)
+        rootpath = "/workspace/data/jeonghonoh/dataset/dynamic/dual_arm/"
+        datapath = os.path.join(rootpath, seq)
+        forward_two_images(data_path = datapath, srt_frame = srt_frame, end_frame = end_frame, model = model, device = args.device, image_size=args.image_size, silent=False, seq = seq)
     
