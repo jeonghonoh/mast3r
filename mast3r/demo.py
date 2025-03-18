@@ -62,6 +62,112 @@ def get_args_parser():
     parser.prog = 'mast3r demo'
     return parser
 
+def convert_dual_scene_to_ply(scene_state, outdir: str, seq: str, name: str, clean_depth=True, min_conf_thr=0.2):
+    if scene_state is None:
+        return None
+    export_dir = os.path.join(outdir, seq)
+    os.makedirs(export_dir, exist_ok=True)
+    export_dir = os.path.join(export_dir, 'pcd')
+    os.makedirs(export_dir, exist_ok=True)
+    export_path = os.path.join(export_dir, f"{name}.ply")
+    export_obj_path = os.path.join(export_dir, f"{name}.obj")
+    scene = scene_state.sparse_ga
+    rgbimg = scene.imgs
+    focals = scene.get_focals().cpu()
+    cams2world = scene.get_im_poses().cpu()
+    
+    pts3d, _, confs = to_numpy(scene.get_dense_pts3d(clean_depth=clean_depth))
+    msk = to_numpy([c > min_conf_thr for c in confs])
+    
+    return _convert_dual_scene_to_ply(imgs = rgbimg, pts3d = pts3d, mask = msk, focals = focals, cams2world = cams2world, export_path = export_path, export_obj_path = export_obj_path)
+
+def _convert_dual_scene_to_ply(imgs, pts3d, mask, focals, cams2world, export_path: str, export_obj_path: str, clean_depth=True, min_conf_thr=0.2):
+    assert len(pts3d) == 2
+    pts3d = to_numpy(pts3d)
+    imgs = to_numpy(imgs)
+    focals = to_numpy(focals)
+    cams2world = to_numpy(cams2world)
+
+    scene = trimesh.Scene()
+    pts = np.concatenate([p[m.ravel()] for p, m in zip(pts3d, mask)]).reshape(-1, 3)
+    col = np.concatenate([p[m] for p, m in zip(imgs, mask)]).reshape(-1, 3)
+    valid_msk = np.isfinite(pts.sum(axis=1))
+    pct = trimesh.PointCloud(pts[valid_msk], colors=col[valid_msk])
+    scene.add_geometry(pct)
+    
+    # add each camera: 생략
+    rot = np.eye(4)
+    rot[:3, :3] = Rotation.from_euler('y', np.deg2rad(180)).as_matrix()
+    scene.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
+    # mesh = scene.geometry # OrderedDict([('geometry_0', <trimesh.PointCloud(vertices.shape=(272846, 3))>)])
+    geom = scene.geometry["geometry_0"]
+    geom.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
+    geom.export(export_path)
+    print('(exporting 3D scene to', export_path, ')')
+    # mesh['geometry_0'].export(export_path)
+    # scene.export(export_path, file_type='ply')
+    # scene.export(export_obj_path, file_type='obj')
+    # print('(exporting 3D scene to', export_obj_path, ')')
+    # breakpoint()
+    
+    return export_path
+
+def convert_multiple_dual_scene_to_ply(scene_state_lst: list, outdir: str, seq: str, clean_depth=True, min_conf_thr=0.2):
+    export_dir = os.path.join(outdir, seq, 'pcd')
+    os.makedirs(export_dir, exist_ok=True)
+    export_path = os.path.join(export_dir, 'multi.ply')
+    
+    all_pts = []  # 모든 포인트 (각각 (N,3))
+    all_cols = []  # 모든 컬러 (각각 (N,3))
+    cam_to_worlds = []  # 모든 카메라 위치 (각각 (4,4))
+    scene_out = trimesh.Scene()
+    
+    for scene_state in scene_state_lst:
+        scene = scene_state.sparse_ga
+        rgbimg = scene.imgs
+        cam_to_worlds.append(scene.get_im_poses().cpu())
+        pts3d, _, confs = to_numpy(scene.get_dense_pts3d(clean_depth=clean_depth))
+        mask = to_numpy([c > min_conf_thr for c in confs])
+        # breakpoint()
+        # pts3d와 rgbimg는 두 요소짜리 리스트라고 가정 (예: [pts_left, pts_right], [img_left, img_right])
+        pts_combined_list = []
+        col_combined_list = []
+        for p, m, im in zip(pts3d, mask, rgbimg):
+            # m은 2D boolean mask (이미지 해상도와 동일)
+            # p[m.ravel()]는 p의 1D 인덱스로 valid 점들을 선택
+            pts_valid = p[m.ravel()]
+            # im[m]는 im의 해당 mask 위치의 컬러 값을 선택 (im은 (H, W, 3))
+            col_valid = im[m]
+            pts_combined_list.append(pts_valid.reshape(-1, 3))
+            col_combined_list.append(col_valid.reshape(-1, 3))
+        
+        pts_merged = np.concatenate(pts_combined_list, axis=0)  # (N_left + N_right, 3)
+        col_merged = np.concatenate(col_combined_list, axis=0)  # (N_left + N_right, 3)
+
+        all_pts.append(pts_merged)
+        all_cols.append(col_merged)
+    
+    every_combine = True
+    if every_combine:    
+        pts_combined = np.concatenate(all_pts, axis=0)
+        cols_combined = np.concatenate(all_cols, axis=0)
+        valid_msk = np.isfinite(pts_combined.sum(axis=1))    
+        pct = trimesh.PointCloud(pts_combined[valid_msk], colors=cols_combined[valid_msk])
+        pct.export(export_path)
+        print('(exporting combined point cloud to', export_path, ')')
+    else:
+        for idx, (pts, cols) in enumerate(zip(all_pts, all_cols)):
+            valid_msk = np.isfinite(pts.sum(axis=1))
+            pct = trimesh.PointCloud(pts[valid_msk], colors=cols[valid_msk])
+            #여기서 pct 여러개를 한 파일로 저장
+            pct.apply_transform(np.linalg.inv(cam_to_worlds[idx][0] @ OPENGL @ np.eye(4)))
+            goem_name = f'geometry_{idx}'
+            scene_out.add_geometry(pct, geom_name=goem_name)
+        scene_out.export(export_path)
+        print('(exporting multiple point clouds to', export_path, ')')
+        breakpoint()
+    return export_path
+
 
 def _convert_scene_output_to_glb(outfile, imgs, pts3d, mask, focals, cams2world, cam_size=0.05,
                                  cam_color=None, as_pointcloud=False,
@@ -114,6 +220,7 @@ def get_3D_model_from_scene(silent, scene_state, min_conf_thr=2, as_pointcloud=F
     """
     extract 3D_model (glb file) from a reconstructed scene
     """
+    # breakpoint()
     if scene_state is None:
         return None
     outfile = scene_state.outfile_name
@@ -647,20 +754,47 @@ def get_flow(left_imgs: list, right_imgs: list, model_path="third_party/RAFT/mod
     return (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask)
 
 
-# for idx, (i, j) in enumerate(symmetry_pairs_idx):
-    # dynamic_mask_1, dynamic_mask_2 = self.find_dynamic_mask_using_pts3d(self.pointmap_i[idx], self.pointmap_j[idx], self.flow_ij[idx], self.flow_ji[idx], normalize=True)
-    # i_idx = self._ei[i]
-    # j_idx = self._ej[i]
-    # self.dynamic_masks[i_idx].append(dynamic_mask_1)
-    # self.dynamic_masks[j_idx].append(dynamic_mask_2)
-# (Pdb) self.flow_ij.shape
-# torch.Size([90, 2, 512, 272])
-# (Pdb) self.flow_ji.shape
-# torch.Size([90, 2, 512, 272])
-# (Pdb) self.flow_valid_mask_i.shape
-# torch.Size([90, 1, 512, 272])
+def apply_transform_pts3d(pts3d: torch.Tensor, transform: torch.Tensor) -> torch.Tensor:
+    """
+    pts3d: (H, W, 3) 형태 [view coordinate]
+    transform: (4, 4) 형태의 SE3 변환 행렬
+    return: (H, W, 3) 형태 [world coordinate]
+    """
+    device = pts3d.device
+    dtype = pts3d.dtype
 
-def find_dynamic_mask_using_pts3d(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, flow_12: torch.Tensor, flow_21: torch.Tensor, valid: torch.Tensor, thres=0.1, normalize=True):
+    H, W, _ = pts3d.shape
+    # (H, W, 3)을 (N, 3)으로 펼치기
+    coords = pts3d.view(-1, 3)
+
+    # 좌표를 homogeneous (N, 4)로 만들어 transform 적용
+    ones = torch.ones((coords.shape[0], 1), device=device, dtype=dtype)
+    coords_hom = torch.cat([coords, ones], dim=-1)  # (N, 4)
+
+    # transform^T 곱 (행렬 곱)
+    coords_world_hom = coords_hom @ transform.T  # (N, 4)
+
+    # w 분할 (透視投影 등 고려, 여기서는 보통 w=1로 유지)
+    w = coords_world_hom[..., 3].clamp_min(1e-10)
+    coords_world = coords_world_hom[..., :3] / w.unsqueeze(-1)  # (N, 3)
+
+    # 다시 (H, W, 3)로 reshape
+    coords_world = coords_world.view(H, W, 3)
+    return coords_world
+
+
+
+def find_dynamic_mask_using_pts3d(
+    pts3d_1: torch.Tensor, 
+    pts3d_2: torch.Tensor, 
+    flow_12: torch.Tensor, 
+    flow_21: torch.Tensor, 
+    valid: torch.Tensor, 
+    transform_1: torch.Tensor,
+    transform_2: torch.Tensor,
+    thres=0.1,
+    normalize=True,
+    normalize_thres = 1.5):
         """
         find the dynamic points in the 3d space using the flow as dense correspondence
         
@@ -674,6 +808,8 @@ def find_dynamic_mask_using_pts3d(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, 
             flow_12 (torch.Tensor): (2, H, W) 형태, view1 -> view2의 흐름
             flow_21 (torch.Tensor): (2, H, W) 형태, view2 -> view1의 흐름
             valid (torch.Tensor): (1, H, W) 형태, occmask에 의해 판단된 valid mask
+            transform_1: (4,4) SE3 행렬. pts3d_1에 적용할 transform
+            transform_2: (4,4) SE3 행렬. pts3d_2에 적용할 transform
             thres (float): 동적 포인트 판단 임계값
             normalize (bool): True일 경우, 평균과 표준편차를 이용해 동적 포인트 비율을 출력
 
@@ -685,6 +821,18 @@ def find_dynamic_mask_using_pts3d(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, 
         assert flow_12.shape == flow_21.shape, 'shape mismatch(flow_12, flow_21)'
         H, W, _ = pts3d_1.shape
         device = flow_12.device
+        
+        rot = np.eye(4)
+        rot[:3, :3] = Rotation.from_euler('y', np.deg2rad(180)).as_matrix()
+        
+        if transform_1 is not None:
+            transform_1 = np.linalg.inv(to_numpy(transform_1) @ OPENGL @ rot)
+            transform_1 = torch.tensor(transform_1, device=device, dtype=torch.float32)
+            pts3d_1 = apply_transform_pts3d(pts3d_1.to(device), transform_1)
+        if transform_2 is not None:
+            transform_2 = np.linalg.inv(to_numpy(transform_2) @ OPENGL @ rot)
+            transform_2 = torch.tensor(transform_2, device=device, dtype=torch.float32)
+            pts3d_2 = apply_transform_pts3d(pts3d_2.to(device), transform_2.to(device))
         
         dynamic_mask_1 = torch.zeros((H, W), dtype=torch.bool, device=device)
         dynamic_mask_2 = torch.zeros((H, W), dtype=torch.bool, device=device)
@@ -710,7 +858,7 @@ def find_dynamic_mask_using_pts3d(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, 
         if normalize:
             mean = dist.mean()
             std = dist.std()
-            too_big_mask = (dist > mean + 1.5*std)
+            too_big_mask = (dist > mean + normalize_thres * std)
             print(f'mean: {mean}, std: {std}, dynamic points: {too_big_mask.sum()/dist.size(0) * 100:.2f}%')
         else:
             too_big_mask = (dist > thres)
@@ -739,7 +887,7 @@ def find_dynamic_mask_using_pts3d(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, 
 
 
 # flowformer_ws
-from third_party.FlowFormerPlusPlus.visualize_flow import forward_flowformer, visualize_flow, generate_pairs, build_model
+from third_party.FlowFormerPlusPlus.visualize_flow import forward_flowformer, build_model
 def flowformer_pairs(samples: list):
     """
     Given a list of samples (from load_stereo_data), extract left and right images
@@ -794,7 +942,7 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     cache_dir = os.path.join('/workspace/data/jeonghonoh/mast3r/', 'cache')
     if not os.path.isdir(cache_dir):
         os.makedirs(cache_dir, exist_ok=True)
-    optim_level = 'refine+depth'
+    optim_level = 'coarse'
     lr1 = 0.07
     niter1 = 500
     lr2 = 0.014
@@ -838,6 +986,7 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     dense_pts3d_total = []
     depthmaps_total = []
     confs_total = []
+    scene_state_lst = []
     for filelist, pairs in zip(filelist_total, pairs_total):
         scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
                                         model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
@@ -853,20 +1002,46 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
         dense_pts3d_total.append(dense_pts3d)
         depthmaps_total.append(depthmaps)
         confs_total.append(confs)
+        
+        scene_state = SparseGAState(scene, False, cache_dir, None)
+        scene_state_lst.append(scene_state)
+        # breakpoint()
+        debug_mode = True #save ply
+        if debug_mode:
+            name = filelist[0].split('/')[-1].split('_')[0]
+            export_path = convert_dual_scene_to_ply(scene_state, 'output/', seq, name, clean_depth = True, min_conf_thr = 0.2)
+    
+    # if debug_mode:
+    #     convert_multiple_dual_scene_to_ply(scene_state_lst, 'output/', seq, clean_depth = True, min_conf_thr = 0.2)    
     # breakpoint()
 
     assert len(dense_pts3d_total) == (len(left_forward_flows) + 1)
 
     #dynamic mask
     debug_mode = True
-    for idx, (dense_pts3d, left_forward_flow, left_backward_flow, left_valid) in enumerate(zip(dense_pts3d_total, left_forward_flows, left_backward_flows, left_valid_masks)):
+    left_index = 0
+    right_index = 1
+    for idx, (left_forward_flow, left_backward_flow, left_valid) in enumerate(zip(left_forward_flows, left_backward_flows, left_valid_masks)):
         # dense_pts3d: list of torch.Tensor, 2 of (H * W, 3) -> (H, W, 3)
         # left_forward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
         # left_backward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
         # left_valid: torch.Tensor, (1, 1, W, H) -> (1, H, W)
         H, W, _ = left_forward_flow.shape
-        # breakpoint() #device check
-        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(dense_pts3d[0].reshape(H, W, 3), dense_pts3d[1].reshape(H, W, 3), left_forward_flow.permute(2, 0, 1), left_backward_flow.permute(2, 0, 1), left_valid.squeeze(0).permute(0, 2, 1), normalize=True)
+        
+        dense_pts3d_prev = dense_pts3d_total[idx][left_index]
+        dense_pts3d_next = dense_pts3d_total[idx + 1][left_index]
+        cam2world_prev = pose_total[idx][left_index]
+        cam2world_next = pose_total[idx + 1][left_index]
+        
+        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(pts3d_1 = dense_pts3d_prev.reshape(H, W, 3), 
+                                                                       pts3d_2 = dense_pts3d_next.reshape(H, W, 3), 
+                                                                       flow_12 = left_forward_flow.permute(2, 0, 1), 
+                                                                       flow_21 = left_backward_flow.permute(2, 0, 1), 
+                                                                       valid = left_valid.squeeze(0).permute(0, 2, 1), 
+                                                                       transform_1 = cam2world_prev,
+                                                                       transform_2 = cam2world_next,
+                                                                       normalize=True,
+                                                                       normalize_thres = 1.5)
         if debug_mode:
             #save dynamic mask
             mask_output_path = os.path.join('/workspace/data/jeonghonoh/mast3r/output', seq, 'dynamic_mask')
@@ -880,9 +1055,22 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
             cv2.imwrite(os.path.join(left_mask_path, f'{0}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
             cv2.imwrite(os.path.join(left_mask_path, f'{1}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
 
+    # breakpoint()
 
-    for idx, (dense_pts3d, right_forward_flow, right_backward_flow, right_valid) in enumerate(zip(dense_pts3d_total, right_forward_flows, right_backward_flows, right_valid_masks)):
-        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(dense_pts3d[0].reshape(H, W, 3), dense_pts3d[1].reshape(H, W, 3), right_forward_flow.permute(2, 0, 1), right_backward_flow.permute(2, 0, 1), right_valid.squeeze(0).permute(0, 2, 1), normalize=True)
+    for idx, (right_forward_flow, right_backward_flow, right_valid) in enumerate(zip(right_forward_flows, right_backward_flows, right_valid_masks)):
+        dense_pts3d_prev = dense_pts3d_total[idx][right_index]
+        dense_pts3d_next = dense_pts3d_total[idx + 1][right_index]
+        cam2world_prev = pose_total[idx][right_index]
+        cam2world_next = pose_total[idx + 1][right_index]
+        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(pts3d_1 = dense_pts3d_prev.reshape(H, W, 3), 
+                                                                       pts3d_2 = dense_pts3d_next.reshape(H, W, 3), 
+                                                                       flow_12 = right_forward_flow.permute(2, 0, 1), 
+                                                                       flow_21 = right_backward_flow.permute(2, 0, 1), 
+                                                                       valid = right_valid.squeeze(0).permute(0, 2, 1), 
+                                                                       transform_1 = cam2world_prev,
+                                                                       transform_2 = cam2world_next,
+                                                                       normalize=True,
+                                                                       normalize_thres = 1.5)
         if debug_mode:
             right_mask_path = os.path.join(mask_output_path, 'right')
             os.makedirs(right_mask_path, exist_ok=True)
@@ -946,7 +1134,7 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
 
     
     
-    breakpoint()
+    # breakpoint()
 
         
 
