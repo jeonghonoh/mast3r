@@ -116,7 +116,7 @@ def convert_dust3r_pairs_naming(imgs, pairs_in):
 
 
 def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc_conf='desc_conf',
-                            device='cuda', dtype=torch.float32, shared_intrinsics=False, **kw):
+                            device='cuda', dtype=torch.float32, shared_intrinsics=False, initialize_pose = False, initialize_values = None, **kw):
     """ Sparse alignment with MASt3R
         imgs: list of image paths
         cache_path: path where to dump temporary files (str)
@@ -163,7 +163,8 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
     # breakpoint()
     imgs, res_coarse, res_fine = sparse_scene_optimizer(
         imgs, subsample, imsizes, pps, base_focals, core_depth, anchors, corres, corres2d, preds_21, canonical_paths, mst,
-        shared_intrinsics=shared_intrinsics, cache_path=cache_path, device=device, dtype=dtype, **kw)
+        shared_intrinsics=shared_intrinsics, cache_path=cache_path, device=device, dtype=dtype,
+        initialize_pose = initialize_pose, initialize_values = initialize_values, **kw)
     # breakpoint()
     return SparseGA(imgs, pairs_in, res_fine or res_coarse, anchors, canonical_paths)
 
@@ -179,12 +180,27 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
                            shared_intrinsics=False,
                            init={}, device='cuda', dtype=torch.float32,
                            matching_conf_thr=5., loss_dust3r_w=0.01,
-                           verbose=True, dbg=()):
+                           verbose=True, dbg=(), initialize_pose = False, initialize_values = None):
     init = copy.deepcopy(init)
+    fixed_focal = True
+    if fixed_focal:
+        assert len(imgs) == 2
+        base_focals = torch.tensor([360.7, 361.6], device=device, dtype=dtype)
     # extrinsic parameters
-    vec0001 = torch.tensor((0, 0, 0, 1), dtype=dtype, device=device)
-    quats = [nn.Parameter(vec0001.clone()) for _ in range(len(imgs))]
-    trans = [nn.Parameter(torch.zeros(3, device=device, dtype=dtype)) for _ in range(len(imgs))]
+    if initialize_pose:
+        # print('initialize pose: sequential')
+        # print(f'pose values: {initialize_values}')
+        # initialize poses are saved in the initialize_values
+        assert initialize_values is not None
+        assert len(initialize_values['quats']) == len(imgs)
+        vec0001 = torch.tensor((0, 0, 0, 1), dtype=dtype, device=device) 
+        quats = [nn.Parameter(torch.tensor(initialize_values['quats'][i], dtype=dtype, device=device)) for i in range(len(imgs))]
+        trans = [nn.Parameter(torch.tensor(initialize_values['trans'][i], dtype=dtype, device=device)) for i in range(len(imgs))]     
+    else:
+        # print('initialize pose: identity')
+        vec0001 = torch.tensor((0, 0, 0, 1), dtype=dtype, device=device)
+        quats = [nn.Parameter(vec0001.clone()) for _ in range(len(imgs))]
+        trans = [nn.Parameter(torch.zeros(3, device=device, dtype=dtype)) for _ in range(len(imgs))]
 
     # initialize
     ones = torch.ones((len(imgs), 1), device=device, dtype=dtype)
@@ -215,7 +231,7 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
         if cam2w is not None:
             rot = cam2w[:3, :3].detach()
             cam_center = cam2w[:3, 3].detach()
-            quats[idx].data[:] = roma.rotmat_to_unitquat(rot)
+            quats[idx].data[:] = roma.rotmat_to_unitquat(rot) #XYZW convention
             trans_offset = med_depth * torch.cat((imsizes[idx] / base_focals[idx] * (0.5 - pps[idx]), ones[:1, 0]))
             trans[idx].data[:] = cam_center + rot @ trans_offset
             del rot

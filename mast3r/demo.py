@@ -6,6 +6,7 @@
 # sparse gradio demo functions
 # --------------------------------------------------------
 import math
+import torch
 import gradio
 import os
 import numpy as np
@@ -45,6 +46,103 @@ class SparseGAState():
         if self.outfile_name is not None and os.path.isfile(self.outfile_name):
             os.remove(self.outfile_name)
         self.outfile_name = None
+
+import numpy as np
+
+def rotmat_to_unitquat_custom(R: np.ndarray, wxyz: bool = False) -> np.ndarray:
+    """
+    Convert rotation matrix or batch of rotation matrices to unit quaternion(s).
+    Adapted from SciPy/roma logic, but using NumPy only.
+    
+    Args:
+        R (np.ndarray): shape (3,3) or (B,3,3).
+        wxyz (bool): if True, return quaternions in (w, x, y, z) order 
+                     instead of default (x, y, z, w).
+    
+    Returns:
+        quaternions (np.ndarray): shape (B,4) if input is (B,3,3),
+                                  shape (4,) if input is (3,3).
+                                  By default: (x, y, z, w) order, or 
+                                  (w, x, y, z) if wxyz=True.
+    """
+    # 1) reshape input to (B, 3, 3)
+    if R.ndim == 2 and R.shape == (3, 3):
+        # single rotation
+        R = R[np.newaxis, ...]  # => (1,3,3)
+    elif R.ndim == 3 and R.shape[-2:] == (3, 3):
+        # multiple rotations (B,3,3)
+        pass
+    else:
+        raise ValueError(f"rotmat_to_unitquat_custom: invalid shape {R.shape}, expected (3,3) or (B,3,3)")
+    
+    B = R.shape[0]  # batch size
+
+    # diagonal elements
+    d0 = R[:, 0, 0]
+    d1 = R[:, 1, 1]
+    d2 = R[:, 2, 2]
+    d3 = d0 + d1 + d2  # trace
+
+    # pick max among d0, d1, d2, d3
+    decision_matrix = np.stack([d0, d1, d2, d3], axis=1)  # shape (B,4)
+    choices = np.argmax(decision_matrix, axis=1)         # shape (B,)
+
+    quat = np.empty((B, 4), dtype=R.dtype)
+
+    # case 1: trace is max
+    trace_mask = (choices == 3)
+    idx_trace = np.nonzero(trace_mask)[0]
+    # x = (R[2,1] - R[1,2]) / (4w) etc., but adapted from the direct approach
+    # see original code or SciPy approach
+    # Here we do direct assignment:
+    # x = R[2,1] - R[1,2]
+    # y = R[0,2] - R[2,0]
+    # z = R[1,0] - R[0,1]
+    # w = 1 + trace
+    quat[idx_trace, 0] = R[idx_trace, 2, 1] - R[idx_trace, 1, 2]  # x
+    quat[idx_trace, 1] = R[idx_trace, 0, 2] - R[idx_trace, 2, 0]  # y
+    quat[idx_trace, 2] = R[idx_trace, 1, 0] - R[idx_trace, 0, 1]  # z
+    quat[idx_trace, 3] = 1.0 + d3[idx_trace]                      # w
+
+    # case 2: one of the diagonals R[i,i] is max
+    idx_not_trace = np.nonzero(choices != 3)[0]
+    if idx_not_trace.size > 0:
+        i = choices[idx_not_trace]
+        j = (i + 1) % 3
+        k = (j + 1) % 3
+
+        # fill: x,y,z,w => using formula from SciPy/roma
+        # quat[idx, i] = 1 - trace + 2 * R[i,i]
+        # quat[idx, j] = R[j,i] + R[i,j]
+        # quat[idx, k] = R[k,i] + R[i,k]
+        # quat[idx, 3] = R[k,j] - R[j,k]
+        # but we do index-based approach
+        quat[idx_not_trace, i] = 1.0 - d3[idx_not_trace] + 2.0 * R[idx_not_trace, i, i]
+        quat[idx_not_trace, j] = R[idx_not_trace, j, i] + R[idx_not_trace, i, j]
+        quat[idx_not_trace, k] = R[idx_not_trace, k, i] + R[idx_not_trace, i, k]
+        quat[idx_not_trace, 3] = R[idx_not_trace, k, j] - R[idx_not_trace, j, k]
+
+    # normalize each quaternion
+    norms = np.linalg.norm(quat, axis=1, keepdims=True)
+    quat /= norms
+
+    # if wxyz => rearrange to (w,x,y,z)
+    if wxyz:
+        # currently (x,y,z,w)
+        # reorder => (w,x,y,z)
+        x = quat[:, 0].copy()
+        y = quat[:, 1].copy()
+        z = quat[:, 2].copy()
+        w = quat[:, 3].copy()
+        quat[:, 0] = w
+        quat[:, 1] = x
+        quat[:, 2] = y
+        quat[:, 3] = z
+
+    # if single rotation => return shape (4,)
+    if B == 1:
+        return quat[0]
+    return quat
 
 
 def get_args_parser():
@@ -98,7 +196,7 @@ def _convert_dual_scene_to_ply(imgs, pts3d, mask, focals, cams2world, export_pat
     # add each camera: 생략
     rot = np.eye(4)
     rot[:3, :3] = Rotation.from_euler('y', np.deg2rad(180)).as_matrix()
-    scene.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
+    # scene.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
     # mesh = scene.geometry # OrderedDict([('geometry_0', <trimesh.PointCloud(vertices.shape=(272846, 3))>)])
     geom = scene.geometry["geometry_0"]
     geom.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
@@ -658,7 +756,6 @@ def make_stereo_pairs(samples, symmetrize=True):
 
 #raft_ws  
 import cv2
-import torch
 from tqdm import tqdm
 from third_party.raft import load_RAFT
 from dust3r.utils.geom_opt import OccMask
@@ -885,6 +982,54 @@ def find_dynamic_mask_using_pts3d(
         
         return dynamic_mask_1, dynamic_mask_2
 
+# def rotation_error(R_pred: np.ndarray, R_gt: np.ndarray) -> float:
+#     # Compute the error rotation matrix: R_error = R_pred * R_gt^T
+#     R_error = np.dot(R_pred, R_gt.T)
+#     # Compute the trace of R_error
+#     trace_val = np.trace(R_error)
+#     # Ensure numerical stability by clipping the value between -1 and 1
+#     cos_angle = np.clip((trace_val - 1) / 2.0, -1.0, 1.0)
+#     # Calculate rotation error in radians
+#     return np.arccos(cos_angle)
+
+# def translation_error(t_pred: np.ndarray, t_gt: np.ndarray) -> float:
+#     # Compute the Euclidean distance between predicted and ground truth translation vectors
+#     return np.linalg.norm(t_pred - t_gt)
+
+def compare_translation_scale(t_pred: np.ndarray, t_gt: np.ndarray) -> bool:
+    # Compute the Euclidean norm (scale) of predicted and ground truth translation vectors
+    scale_pred = np.linalg.norm(t_pred)
+    scale_gt = np.linalg.norm(t_gt)
+    
+    if np.isclose(scale_pred, scale_gt, atol=0.01): # 1cm
+        print("Pred and Ground Truth are similar in scale.")
+        return True
+    elif scale_pred > scale_gt:
+        print("Predicted scale is larger than Ground Truth.")
+        return False
+    else:
+        print("Predicted scale is smaller than Ground Truth.")
+        return False
+
+def evaluate_relative_pose_error(relative_pose_pred: np.ndarray, relative_pose_gt: np.ndarray) -> tuple:
+    error_transform = np.dot(np.linalg.inv(relative_pose_gt), relative_pose_pred)
+    
+    # Extract the rotation error and translation error from the error transformation
+    R_err = error_transform[:3, :3]
+    t_err = error_transform[:3, 3]
+    
+    # Calculate rotation error using the trace of the rotation error matrix
+    trace_val = np.trace(R_err)
+    cos_angle = np.clip((trace_val - 1) / 2.0, -1.0, 1.0)
+    rot_err = np.arccos(cos_angle)
+    
+    # Calculate translation error as the norm of the translation error vector
+    trans_err = np.linalg.norm(t_err)
+    
+    compare_translation_scale(relative_pose_gt[:3, 3], relative_pose_pred[:3, 3])
+    
+    return rot_err, trans_err
+
 
 # flowformer_ws
 from third_party.FlowFormerPlusPlus.visualize_flow import forward_flowformer, build_model
@@ -927,8 +1072,6 @@ def flowformer_pairs(samples: list):
         right_file_name.append((right_file_name_lst[i], right_file_name_lst[i+1]))
 
     return (left_file_name, right_file_name), (left_img_pairs, right_img_pairs)
-
-
 
 # def forward_two_images(data_path, outdir, gradio_delete_cache, model, device, silent, image_size, current_scene_state,
 #                             filelist, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
@@ -978,6 +1121,22 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
             right_valid_masks.append(right_valid_mask)
 
     # breakpoint() #check: left_valid_mask, right_valid_mask ratio (0.85~0.95)
+    # valid mask visualization
+    debug_mode = True
+    if debug_mode:
+        valid_dir = os.path.join('output', seq, 'valid_mask')
+        os.makedirs(valid_dir, exist_ok=True)
+        valid_left_dir = os.path.join(valid_dir, 'left')
+        valid_right_dir = os.path.join(valid_dir, 'right')
+        os.makedirs(valid_left_dir, exist_ok=True)
+        os.makedirs(valid_right_dir, exist_ok=True)
+        for left_valid_mask, right_valid_mask, left_name, right_name in zip(left_valid_masks, right_valid_masks, left_names, right_names):
+            left_valid_mask = left_valid_mask.squeeze().cpu().numpy()
+            right_valid_mask = right_valid_mask.squeeze().cpu().numpy()
+            left_name = left_name.split('/')[-1].split('.')[0]
+            right_name = right_name.split('/')[-1].split('.')[0]
+            cv2.imwrite(os.path.join(valid_left_dir, f'{left_name}_valid_mask.png'), left_valid_mask.astype(np.uint8) * 255)
+            cv2.imwrite(os.path.join(valid_right_dir, f'{right_name}_valid_mask.png'), right_valid_mask.astype(np.uint8) * 255)
 
 
     focal_total = []
@@ -987,11 +1146,13 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     depthmaps_total = []
     confs_total = []
     scene_state_lst = []
+    initialize_pose = False
+    initialize_values = {}
     for filelist, pairs in zip(filelist_total, pairs_total):
         scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
                                         model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
                                         opt_depth = 'depth' in optim_level, shared_intrinsics = shared_intrinsics,
-                                        matching_conf_thr = matching_conf_thr)
+                                        matching_conf_thr = matching_conf_thr, initialize_pose = initialize_pose, initialize_values = initialize_values)
         focal = scene.get_focals().cpu()
         pose = scene.get_im_poses().cpu()
         sparse_pts3d = scene.get_sparse_pts3d()
@@ -1002,6 +1163,17 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
         dense_pts3d_total.append(dense_pts3d)
         depthmaps_total.append(depthmaps)
         confs_total.append(confs)
+
+        
+        initialize_pose = True
+        pose_np = pose.numpy()
+        R_mat = pose_np[:, :3, :3]
+        tran = pose_np[:, :3, 3].astype(np.float32)
+        # quaternion (x, y, z, w)
+        quat = rotmat_to_unitquat_custom(R_mat, wxyz=False) #xyzw
+        # breakpoint()
+        initialize_values['quats'] = quat
+        initialize_values['trans'] = tran
         
         scene_state = SparseGAState(scene, False, cache_dir, None)
         scene_state_lst.append(scene_state)
@@ -1011,9 +1183,34 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
             name = filelist[0].split('/')[-1].split('_')[0]
             export_path = convert_dual_scene_to_ply(scene_state, 'output/', seq, name, clean_depth = True, min_conf_thr = 0.2)
     
+
+    for pose, sample in zip(pose_total, samples):
+        (left_c2w, right_c2w) = pose
+        relative_pose_l2r = torch.inverse(left_c2w) @ right_c2w
+        relative_pose_pred = to_numpy(relative_pose_l2r)
+        
+        left_gt_pose = sample["left_pose"]
+        right_gt_pose = sample["right_pose"]
+        relative_pose_gt = np.linalg.inv(left_gt_pose) @ right_gt_pose
+        
+        # print(f'Ground truth left pose: \n{left_gt_pose}')
+        # print(f'Ground truth right pose: \n{right_gt_pose}')
+        # print(f'Predicted left pose: \n{left_c2w}')
+        # print(f'Predicted right pose: \n{right_c2w}')
+        
+        # print(f'Ground truth relative pose: \n{relative_pose_gt}')
+        # print(f'Predicted relative pose: \n{relative_pose_pred}')
+
+        # print(f'Ground truth relative pose: \n{relative_pose_gt}')
+        # print(f'Predicted relative pose: \n{relative_pose_pred}')
+        rot_err, trans_err = evaluate_relative_pose_error(relative_pose_pred, relative_pose_gt)
+        print(f'Rotation error: {rot_err:.4f} rad, Translation error: {trans_err:.4f} m')
+
+    
+    
+    
     # if debug_mode:
     #     convert_multiple_dual_scene_to_ply(scene_state_lst, 'output/', seq, clean_depth = True, min_conf_thr = 0.2)    
-    # breakpoint()
 
     assert len(dense_pts3d_total) == (len(left_forward_flows) + 1)
 
@@ -1088,35 +1285,35 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     # # (num - 1, 2, 288, 512)
     # (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask) = get_flow(left_imgs, right_imgs)
     # # breakpoint()
-    # debug_mode = True
-    # if debug_mode:
-    #     #save every images, flows
-    #     output_save_path = '/workspace/data/jeonghonoh/mast3r/output'
-    #     os.makedirs(output_save_path, exist_ok=True)
-    #     img_path = os.path.join(output_save_path, seq, 'images')
-    #     os.makedirs(img_path, exist_ok=True)
-    #     flow_path = os.path.join(output_save_path, seq, 'flows')
-    #     os.makedirs(flow_path, exist_ok=True)
-    #     flow_valid_path = os.path.join(output_save_path, seq, 'flow_valid')
-    #     os.makedirs(flow_valid_path, exist_ok=True)
-    #     img_path_left = os.path.join(img_path, 'left')
-    #     os.makedirs(img_path_left, exist_ok=True)
-    #     img_path_right = os.path.join(img_path, 'right')
-    #     os.makedirs(img_path_right, exist_ok=True)
-    #     flow_path_left = os.path.join(flow_path, 'left')
-    #     os.makedirs(flow_path_left, exist_ok=True)
-    #     flow_path_right = os.path.join(flow_path, 'right')
-    #     os.makedirs(flow_path_right, exist_ok=True)
-    #     flow_valid_path_left = os.path.join(flow_valid_path, 'left')
-    #     os.makedirs(flow_valid_path_left, exist_ok=True)
-    #     flow_valid_path_right = os.path.join(flow_valid_path, 'right')
-    #     os.makedirs(flow_valid_path_right, exist_ok=True)
-    #     sample_num_list = [sample["sample_number"] for sample in samples]
-    #     for sample_num, sample in zip(sample_num_list, samples):
-    #         left_img = sample["left_img"]
-    #         right_img = sample["right_img"]
-    #         left_img.save(os.path.join(img_path_left, f'{sample_num}_left.png'))
-    #         right_img.save(os.path.join(img_path_right, f'{sample_num}_right.png'))
+    debug_mode = True
+    if debug_mode:
+        #save every images, flows
+        output_save_path = '/workspace/data/jeonghonoh/mast3r/output'
+        os.makedirs(output_save_path, exist_ok=True)
+        img_path = os.path.join(output_save_path, seq, 'images')
+        os.makedirs(img_path, exist_ok=True)
+        flow_path = os.path.join(output_save_path, seq, 'flows')
+        os.makedirs(flow_path, exist_ok=True)
+        flow_valid_path = os.path.join(output_save_path, seq, 'flow_valid')
+        os.makedirs(flow_valid_path, exist_ok=True)
+        img_path_left = os.path.join(img_path, 'left')
+        os.makedirs(img_path_left, exist_ok=True)
+        img_path_right = os.path.join(img_path, 'right')
+        os.makedirs(img_path_right, exist_ok=True)
+        flow_path_left = os.path.join(flow_path, 'left')
+        os.makedirs(flow_path_left, exist_ok=True)
+        flow_path_right = os.path.join(flow_path, 'right')
+        os.makedirs(flow_path_right, exist_ok=True)
+        # flow_valid_path_left = os.path.join(flow_valid_path, 'left')
+        # os.makedirs(flow_valid_path_left, exist_ok=True)
+        # flow_valid_path_right = os.path.join(flow_valid_path, 'right')
+        # os.makedirs(flow_valid_path_right, exist_ok=True)
+        sample_num_list = [sample["sample_number"] for sample in samples]
+        for sample_num, sample in zip(sample_num_list, samples):
+            left_img = sample["left_img"]
+            right_img = sample["right_img"]
+            left_img.save(os.path.join(img_path_left, f'{sample_num}_left.png'))
+            right_img.save(os.path.join(img_path_right, f'{sample_num}_right.png'))
     #     for sample_num, (left_flow, right_flow) in zip(sample_num_list, zip(left_flow_forward, right_flow_forward)):
     #         #flow: (2, 288, 512)
     #         left_img = flow_to_image(left_flow.permute(1, 2, 0).cpu().numpy())
