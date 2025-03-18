@@ -129,6 +129,7 @@ dmypy.json
 .pyre/
 
 # Ignore unnecessary files
+./output/
 __pycache__/
 .vscode/
 .idea/
