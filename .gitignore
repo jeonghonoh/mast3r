@@ -130,6 +130,7 @@ dmypy.json
 
 # Ignore unnecessary files
 output/
+output/*
 __pycache__/
 .vscode/
 .idea/
