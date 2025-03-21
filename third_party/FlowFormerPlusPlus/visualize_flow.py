@@ -67,7 +67,7 @@ def compute_weight(hws, image_shape, patch_size=TRAIN_SIZE, sigma=1.0, wtype='ga
     return patch_weights
 
 def compute_flow(model, image1, image2, weights=None):
-    print(f"computing flow...")
+    # print(f"computing flow...")
 
     image_size = image1.shape[1:]
 
@@ -142,7 +142,7 @@ def prepare_image(root_dir, viz_root_dir, fn1, fn2, keep_size):
 
 import PIL.Image
 def load_image(img1: PIL.Image, img2: PIL.Image, keep_size = True):
-    print(f"Loading image...")
+    # print(f"Loading image...")
     # <PIL.Image.Image image mode=RGB size=512x288>
     image1 = np.array(img1).astype(np.uint8)[..., :3]
     image2 = np.array(img2).astype(np.uint8)[..., :3]

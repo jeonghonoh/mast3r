@@ -160,6 +160,67 @@ def get_args_parser():
     parser.prog = 'mast3r demo'
     return parser
 
+def align_convert_dual_scene_to_ply(scene_state, outdir: str, seq: str, name: str, clean_depth=True, min_conf_thr=0.2):
+    if scene_state is None:
+        return None
+    export_dir = os.path.join(outdir, seq)
+    os.makedirs(export_dir, exist_ok=True)
+    export_dir = os.path.join(export_dir, 'pcd')
+    os.makedirs(export_dir, exist_ok=True)
+    export_path = os.path.join(export_dir, f"{name}.ply")
+    scene = scene_state.sparse_ga
+    pts3d, _, confs = to_numpy(scene.get_dense_pts3d(clean_depth=clean_depth))
+    msk = to_numpy([c > min_conf_thr for c in confs])
+    
+    export_scene = trimesh.Scene()
+    pts = np.concatenate([p[m.ravel()] for p, m in zip(pts3d, msk)]).reshape(-1, 3)
+    col = np.concatenate([p[m] for p, m in zip(scene.imgs, msk)]).reshape(-1, 3)
+    valid_msk = np.isfinite(pts.sum(axis=1))
+    pct = trimesh.PointCloud(pts[valid_msk], colors=col[valid_msk])
+    export_scene.add_geometry(pct)
+    geom = export_scene.geometry["geometry_0"]
+    geom.export(export_path)
+    print('(exporting 3D scene to', export_path, ')')
+    
+    masking_option = True
+    #export each geometry
+    srt = int(name.split('_')[1])
+    end = int(name.split('_')[2])
+    idx = 0
+    for i in range(srt, end+1):
+        name = f"align_{i}"
+        export_path = os.path.join(export_dir, f"{name}.ply")
+        if masking_option:
+            pts_l = pts3d[idx][msk[idx].ravel()].reshape(-1, 3)
+            pts_r = pts3d[idx+1][msk[idx+1].ravel()].reshape(-1, 3)
+            col_l = scene.imgs[idx][msk[idx]].reshape(-1, 3)
+            col_r = scene.imgs[idx+1][msk[idx+1]].reshape(-1, 3)
+            valid_msk_l = np.isfinite(pts_l.sum(axis=1))
+            valid_msk_r = np.isfinite(pts_r.sum(axis=1))
+            pts = np.concatenate([pts_l[valid_msk_l], pts_r[valid_msk_r]])
+            col = np.concatenate([col_l[valid_msk_l], col_r[valid_msk_r]])
+            valid_msk = np.concatenate([valid_msk_l, valid_msk_r])
+            pct = trimesh.PointCloud(pts[valid_msk], colors=col[valid_msk])
+        else:
+            pts_l = pts3d[idx].reshape(-1, 3)
+            pts_r = pts3d[idx+1].reshape(-1, 3)
+            col_l = scene.imgs[idx].reshape(-1, 3)
+            col_r = scene.imgs[idx+1].reshape(-1, 3)
+            valid_msk_l = np.isfinite(pts_l.sum(axis=1))
+            valid_msk_r = np.isfinite(pts_r.sum(axis=1))
+            pts = np.concatenate([pts_l[valid_msk_l], pts_r[valid_msk_r]])
+            col = np.concatenate([col_l[valid_msk_l], col_r[valid_msk_r]])
+            valid_msk = np.concatenate([valid_msk_l, valid_msk_r])
+            pct = trimesh.PointCloud(pts[valid_msk], colors=col[valid_msk])
+        export_scene = trimesh.Scene()
+        export_scene.add_geometry(pct)
+        geom = export_scene.geometry["geometry_0"]
+        geom.export(export_path)
+        print('(exporting 3D scene to', export_path, ')')
+        idx += 2
+
+    return
+
 def convert_dual_scene_to_ply(scene_state, outdir: str, seq: str, name: str, clean_depth=True, min_conf_thr=0.2):
     if scene_state is None:
         return None
@@ -180,7 +241,7 @@ def convert_dual_scene_to_ply(scene_state, outdir: str, seq: str, name: str, cle
     return _convert_dual_scene_to_ply(imgs = rgbimg, pts3d = pts3d, mask = msk, focals = focals, cams2world = cams2world, export_path = export_path, export_obj_path = export_obj_path)
 
 def _convert_dual_scene_to_ply(imgs, pts3d, mask, focals, cams2world, export_path: str, export_obj_path: str, clean_depth=True, min_conf_thr=0.2):
-    assert len(pts3d) == 2
+    # assert len(pts3d) == 2
     pts3d = to_numpy(pts3d)
     imgs = to_numpy(imgs)
     focals = to_numpy(focals)
@@ -190,6 +251,7 @@ def _convert_dual_scene_to_ply(imgs, pts3d, mask, focals, cams2world, export_pat
     pts = np.concatenate([p[m.ravel()] for p, m in zip(pts3d, mask)]).reshape(-1, 3)
     col = np.concatenate([p[m] for p, m in zip(imgs, mask)]).reshape(-1, 3)
     valid_msk = np.isfinite(pts.sum(axis=1))
+    # breakpoint()
     pct = trimesh.PointCloud(pts[valid_msk], colors=col[valid_msk])
     scene.add_geometry(pct)
     
@@ -754,11 +816,38 @@ def make_stereo_pairs(samples, symmetrize=True):
 
     return filelist_total, pairs_total
 
+def align_mode_stereo_pairs(samples, symmetrize=True):
+    ret_filelist = []
+    ret_pairs = []
+    instance_idx = 0
+    for sample in samples:
+        ret_filelist.append(sample["left_img_path"])
+        ret_filelist.append(sample["right_img_path"])
+        left_img = sample["left_img"]
+        right_img = sample["right_img"]
+        left_dict = dict(img=ImgNorm(left_img)[None], true_shape=np.int32([left_img.size[::-1]]), idx=instance_idx, instance=str(instance_idx))
+        instance_idx += 1
+        right_dict = dict(img=ImgNorm(right_img)[None], true_shape=np.int32([right_img.size[::-1]]), idx=instance_idx, instance=str(instance_idx))
+        instance_idx += 1
+        ret_pairs.append((left_dict, right_dict))
+        ret_pairs.append((right_dict, left_dict))
+    
+    prev_left = None
+    for i in range(0, len(ret_pairs), 2):
+        left, _ = ret_pairs[i]
+        if prev_left is not None:
+            ret_pairs.append((prev_left, left))
+            ret_pairs.append((left, prev_left))
+        prev_left = left
+    
+    return ret_filelist, ret_pairs
+
+
 #raft_ws  
 import cv2
 from tqdm import tqdm
 from third_party.raft import load_RAFT
-from dust3r.utils.geom_opt import OccMask
+from dust3r.utils.geom_opt import OccMask, DepthBasedWarping
 from third_party.RAFT.core.utils.flow_viz import flow_to_image
 def make_flow_image_lists(samples):
     """
@@ -1073,6 +1162,309 @@ def flowformer_pairs(samples: list):
 
     return (left_file_name, right_file_name), (left_img_pairs, right_img_pairs)
 
+
+
+def get_3d_distance_using_flow(pts3d_1: torch.Tensor, pts3d_2: torch.Tensor, flow: torch.Tensor, forward = True) -> torch.Tensor:
+    """
+    Compute the 3D distance between two 3D point clouds using the flow as dense correspondence.
+    pts3d_1: (H, W, 3) shape, 3D point cloud of view 1
+    pts3d_2: (H, W, 3) shape, 3D point cloud of view 2
+    flow: (H, W, 2) shape,
+        if forward=True : flow from view1 to view2 (1->2)
+        if forward=False: flow from view2 to view1 (2->1)
+    
+    return: (H, W) shape, 3D distance between the two point clouds, coordinate is from view 1
+    
+    Explanation:
+    1) forward=True
+       dist[y1,x1] = norm( pts3d_1[y1,x1] - pts3d_2[y2,x2] ),
+         where (y2,x2) = round( (y1,x1) + flow[y1,x1] )
+       -> dist가 "image1 픽셀" 위치에 기록.
+
+    2) forward=False
+       dist[y1,x1] = norm( pts3d_1[y1,x1] - pts3d_2[y2,x2] ),
+         where (y2,x2) is the pixel in image2, 
+               and flow[y2,x2] tells (y2,x2) -> (y1,x1).
+       -> dist가 "image1 픽셀" 위치에 기록.
+    """
+    H, W, _ = pts3d_1.shape
+    device = pts3d_1.device
+    dist = torch.zeros(H, W, device=device)
+    
+    if forward:
+        coords_1 = torch.stack(torch.meshgrid(torch.arange(H, device=device),
+                                            torch.arange(W, device=device)), dim=-1)
+        coords_1_fwd = coords_1 + flow
+        coords_1_rounded = coords_1_fwd.round().long() # image1+flow의 좌표 (image2 pixel 좌표)
+        
+        # in-bound check
+        valid_mask = (coords_1_rounded[...,0]>=0)&(coords_1_rounded[...,0]<H)&\
+                    (coords_1_rounded[...,1]>=0)&(coords_1_rounded[...,1]<W) #image1의 pixel 좌표가 flow를 따라 이동한 뒤 image 2의 범위 내에 있는지 mask
+        valid_idx = valid_mask.nonzero(as_tuple=False)                      #image1의 pixel 좌표가 image 2의 범위 내에 있는 pixel 좌표
+        pcd_1_valid = pts3d_1[valid_idx[:,0], valid_idx[:,1]]
+        coords2 = coords_1_rounded[valid_idx[:,0], valid_idx[:,1]] #image 2의 대응점 좌표
+        pcd_2_valid = pts3d_2[coords2[:,0], coords2[:,1]]
+        dist_valid = torch.norm(pcd_2_valid - pcd_1_valid, dim=1)
+        
+        dist[valid_idx[:,0], valid_idx[:,1]] = dist_valid
+    else:
+        #flow: flow 2 -> 1
+        coords_2 = torch.stack(torch.meshgrid(torch.arange(H, device=device),
+                                            torch.arange(W, device=device)), dim=-1)
+        coords_2_fwd = coords_2 + flow  # (H,W,2) ; (y2,x2)+(flow2_1) => (y1,x1)
+        coords_2_rounded = coords_2_fwd.round().long()
+        valid_mask = (
+            (coords_2_rounded[...,0] >= 0) & (coords_2_rounded[...,0] < H) &
+            (coords_2_rounded[...,1] >= 0) & (coords_2_rounded[...,1] < W)
+        )
+        valid_idx = valid_mask.nonzero(as_tuple=False)
+        # x2 = pts3d_2[y2,x2]
+        pcd_2_valid = pts3d_2[valid_idx[:,0], valid_idx[:,1]]
+        # coords_1 = (y1,x1)
+        coords_1 = coords_2_rounded[valid_idx[:,0], valid_idx[:,1]]  # shape(N,2)
+        # x1 = pts3d_1[y1,x1]
+        pcd_1_valid = pts3d_1[coords_1[:,0], coords_1[:,1]]
+
+        dist_valid = torch.norm(pcd_1_valid - pcd_2_valid, dim=1)
+
+        # dist를 image1 기준으로 저장 => dist[y1,x1] = distance
+        dist[coords_1[:,0], coords_1[:,1]] = dist_valid
+    
+    cv2.imwrite('dist.png', (dist/dist.max()*255).cpu().numpy().astype(np.uint8))
+    breakpoint()    
+
+    return dist
+
+
+
+# def warp_to_ego_flow(src_R: torch.Tensor, src_t: torch.Tensor, tgt_R: torch.Tensor, tgt_t: torch.Tensor, src_disp: torch.Tensor, K: torch.Tensor, inv_K: torch.Tensor) -> torch.Tensor:
+#     """
+#     Args:
+#             src_R (FloatTensor): 1x3x3
+#             src_t (FloatTensor): 1x3x1
+#             tgt_R (FloatTensor): Nx3x3
+#             tgt_t (FloatTensor): Nx3x1
+#             src_disp (FloatTensor): Nx1XHxW
+#             src_K (FloatTensor): 1x3x3
+#     """
+#     _, _, H, W = src_disp.shape
+#     B = tgt_R.shape[0]
+#     device = src_disp.device
+#     if not hasattr(self, "coord"):
+#         self.generate_grid(H, W, device=device)
+#     else:
+#         if self.coord.shape[-1] != H * W:
+#             del self.coord
+#             self.generate_grid(H, W, device=device)
+#     # if self.jitted_warp_by_disp is None:
+#     # self.jitted_warp_by_disp = torch.jit.trace(
+#     #     warp_by_disp, (src_R.detach(), src_t.detach(), tgt_R.detach(), tgt_t.detach(), K, src_disp.detach(), self.coord, inv_K))
+
+#     return warp_by_disp(src_R, src_t, tgt_R, tgt_t, K, src_disp, self.coord, inv_K, debug_mode, use_depth)
+
+
+def decouple_adjacent_pcds(left_pcds_1: torch.Tensor, right_pcds_1: torch.Tensor, #torch.Size([147456, 3])
+                           left_conf_1: torch.Tensor, right_conf_1: torch.Tensor, #torch.Size([288, 512])
+                           left_pcds_2: torch.Tensor, right_pcds_2: torch.Tensor,
+                           left_conf_2: torch.Tensor, right_conf_2: torch.Tensor,
+                           left_fwd_flow: torch.Tensor, right_fwd_flow: torch.Tensor,     #torch.Size([288, 512, 2])
+                           left_bwd_flow: torch.Tensor, right_bwd_flow: torch.Tensor,
+                           left_pose_1: torch.Tensor, right_pose_1: torch.Tensor,
+                           left_pose_2: torch.Tensor, right_pose_2: torch.Tensor,
+                           left_depth_1: torch.Tensor, right_depth_1: torch.Tensor,
+                           left_depth_2: torch.Tensor, right_depth_2: torch.Tensor,
+                           left_focal: int, right_focal: int,
+                           alpha = 0.5, threshold = 0.5, space_3d = True) -> tuple:
+    '''
+    output: dynamic_pcds, static_pcds, frame 1 기준 pcds decoupling
+    '''
+    device = left_pcds_1.device
+    left_pose_1 = left_pose_1.to(device)
+    right_pose_1 = right_pose_1.to(device)
+    left_pose_2 = left_pose_2.to(device)
+    right_pose_2 = right_pose_2.to(device)
+    left_K = torch.tensor([[left_focal, 0.0,        256.0],
+                           [0.0,        left_focal, 144.0],
+                           [0.0,        0.0,        1.0]], device=device)
+    right_K = torch.tensor([[right_focal, 0.0,        256.0],
+                            [0.0,        right_focal, 144.0],
+                            [0.0,        0.0,        1.0]], device=device)
+    H, W = left_conf_1.shape
+    left_pcds_1 = left_pcds_1.view(H, W, 3)
+    right_pcds_1 = right_pcds_1.view(H, W, 3)
+    left_pcds_2 = left_pcds_2.view(H, W, 3)
+    right_pcds_2 = right_pcds_2.view(H, W, 3)
+    left_dynamic_pixels_score = torch.zeros(H, W, dtype=torch.float32, device=left_pcds_1.device)
+    right_dynamic_pixels_score = torch.zeros(H, W, dtype=torch.float32, device=right_pcds_1.device)
+    
+    # algorithm for decoupling dynamic and static pixels
+    if space_3d: 
+        # step 1: left_1의 (u, v)에서 left_2의 (u+fwd, v_fwd)로 forward flow를 이용해서 3d 점들 사이의 거리를 계산 (dist_1: distance between (x1, y1, z1) and (x2, y2, z2))
+        left_dist_1 = get_3d_distance_using_flow(left_pcds_1, left_pcds_2, left_fwd_flow, forward=True)
+        right_dist_1 = get_3d_distance_using_flow(right_pcds_1, right_pcds_2, right_fwd_flow, forward=True)
+
+        # step 2: left_2의 (u+fwd, v_fwd)와 left_1의 (u+fwd+bwd, v_fwd+bwd)의 거리를 계산 (dist_2: distance between (x2, y2, z2) and (x3, y3, z3))
+        left_dist_2 = get_3d_distance_using_flow(left_pcds_1, left_pcds_2, left_bwd_flow, forward=False)
+        right_dist_2 = get_3d_distance_using_flow(right_pcds_1, right_pcds_2, right_bwd_flow, forward=False)
+        
+        # step 3: (x1, y1, z1)과 (x3, y3, z3)의 거리를 계산 (dist_error: distance between (x1, y1, z1) and (x3, y3, z3))
+        
+        # step 4: dist_1, dist_2, dist_error를 이용해서 distance score를 계산 (0~1, 클수록 dynamic에 가까움)
+        # normalize dist_1, dist_2
+        all_dist = torch.cat([left_dist_1.view(-1), left_dist_2.view(-1)], dim=0)
+        d_min = all_dist.min()
+        d_max = all_dist.max()
+        dist_range = d_max - d_min + 1e-6
+        left_dist_1 = (left_dist_1 - d_min) / dist_range
+        left_dist_2 = (left_dist_2 - d_min) / dist_range
+        all_dist = torch.cat([right_dist_1.view(-1), right_dist_2.view(-1)], dim=0)
+        d_min = all_dist.min()
+        d_max = all_dist.max()
+        dist_range = d_max - d_min + 1e-6
+        right_dist_1 = (right_dist_1 - d_min) / dist_range
+        right_dist_2 = (right_dist_2 - d_min) / dist_range
+    else:
+        # step 1: ego_flow와 optical flow를 이용해서 dynamic pixel score를 계산
+        depth_wrapper = DepthBasedWarping()
+        #torch.Size([1, 3, 288, 512])
+        ego_flow_1_2, _ = depth_wrapper(src_R=left_pose_1[:3, :3].view(1, 3, 3), src_t=left_pose_1[:3, 3].view(1, 3, 1),
+                                        tgt_R=left_pose_2[:3, :3].view(1, 3, 3), tgt_t=left_pose_2[:3, 3].view(1, 3, 1),
+                                        src_disp=1/(left_depth_1 + 1e-6).view(1, 1, H, W), K=left_K.view(1, 3, 3), inv_K=torch.linalg.inv(left_K).view(1, 3, 3))
+        ego_flow_2_1, _ = depth_wrapper(src_R=left_pose_2[:3, :3].view(1, 3, 3), src_t=left_pose_2[:3, 3].view(1, 3, 1),
+                                        tgt_R=left_pose_1[:3, :3].view(1, 3, 3), tgt_t=left_pose_1[:3, 3].view(1, 3, 1),
+                                        src_disp=1/(left_depth_2 + 1e-6).view(1, 1, H, W), K=left_K.view(1, 3, 3), inv_K=torch.linalg.inv(left_K).view(1, 3, 3))
+
+        left_dist_1 = torch.norm(ego_flow_1_2[:, :2, :, :] - left_fwd_flow.reshape(1, 2, H, W), dim=1)
+        right_dist_1 = torch.norm(ego_flow_2_1[:, :2, :, :] - left_bwd_flow.reshape(1, 2, H, W), dim=1)
+        
+        ego_flow_1_2, _ = depth_wrapper(src_R=right_pose_1[:3, :3].view(1, 3, 3), src_t=right_pose_1[:3, 3].view(1, 3, 1),
+                                        tgt_R=right_pose_2[:3, :3].view(1, 3, 3), tgt_t=right_pose_2[:3, 3].view(1, 3, 1),
+                                        src_disp=1/(right_depth_1 + 1e-6).view(1, 1, H, W), K=right_K.view(1, 3, 3), inv_K=torch.linalg.inv(right_K).view(1, 3, 3))
+        ego_flow_2_1, _ = depth_wrapper(src_R=right_pose_2[:3, :3].view(1, 3, 3), src_t=right_pose_2[:3, 3].view(1, 3, 1),
+                                        tgt_R=right_pose_1[:3, :3].view(1, 3, 3), tgt_t=right_pose_1[:3, 3].view(1, 3, 1),
+                                        src_disp=1/(right_depth_2 + 1e-6).view(1, 1, H, W), K=right_K.view(1, 3, 3), inv_K=torch.linalg.inv(right_K).view(1, 3, 3))
+        # breakpoint()
+        left_dist_2 = torch.norm(ego_flow_1_2[:, :2, :, :] - right_fwd_flow.reshape(1, 2, H, W), dim=1)
+        right_dist_2 = torch.norm(ego_flow_2_1[:, :2, :, :] - right_bwd_flow.reshape(1, 2, H, W), dim=1)
+        
+        #normalize
+        left_dist_1 = (left_dist_1 - left_dist_1.amin(dim=(1, 2), keepdim=True)) / (left_dist_1.amax(dim=(1, 2), keepdim=True) - left_dist_1.amin(dim=(1, 2), keepdim=True) + 1e-6)
+        right_dist_1 = (right_dist_1 - right_dist_1.amin(dim=(1, 2), keepdim=True)) / (right_dist_1.amax(dim=(1, 2), keepdim=True) - right_dist_1.amin(dim=(1, 2), keepdim=True) + 1e-6)
+        left_dist_2 = (left_dist_2 - left_dist_2.amin(dim=(1, 2), keepdim=True)) / (left_dist_2.amax(dim=(1, 2), keepdim=True) - left_dist_2.amin(dim=(1, 2), keepdim=True) + 1e-6)
+        right_dist_2 = (right_dist_2 - right_dist_2.amin(dim=(1, 2), keepdim=True)) / (right_dist_2.amax(dim=(1, 2), keepdim=True) - right_dist_2.amin(dim=(1, 2), keepdim=True) + 1e-6)
+        cv2.imwrite('left_dist_1.png', (left_dist_1[0] * 255).cpu().numpy().astype(np.uint8))
+        cv2.imwrite('right_dist_1.png', (right_dist_1[0] * 255).cpu().numpy().astype(np.uint8))
+        cv2.imwrite('left_dist_2.png', (left_dist_2[0] * 255).cpu().numpy().astype(np.uint8))
+        cv2.imwrite('right_dist_2.png', (right_dist_2[0] * 255).cpu().numpy().astype(np.uint8))
+    # breakpoint()
+    # step 5: mast3r의 confidence score는 0~1로 normalize되어있는데 클수록 신뢰도가 높고, static에 가까움
+    
+    # step 6: confidence score와 distance score를 이용해서 dynamic pixel score를 계산
+    
+    
+    
+    # dynamic_pcds, static_pcds
+    # left_pcds_1 에서 left_dynamic_pixels > threshold 인 픽셀들만 dynamic_pcds에 추가
+    l_dynamic_pcds = left_pcds_1[left_dynamic_pixels_score > threshold].view(-1, 3)
+    r_dynamic_pcds = right_pcds_1[right_dynamic_pixels_score > threshold].view(-1, 3)
+    dynamic_pcds = torch.cat([l_dynamic_pcds, r_dynamic_pcds], dim=0)
+    l_static_pcds = left_pcds_1[left_dynamic_pixels_score <= threshold].view(-1, 3)
+    r_static_pcds = right_pcds_1[right_dynamic_pixels_score <= threshold].view(-1, 3)
+    static_pcds = torch.cat([l_static_pcds, r_static_pcds], dim=0)
+    
+    return dynamic_pcds, static_pcds, left_dynamic_pixels_score, right_dynamic_pixels_score #torch.Size([d, 3]), torch.Size([s, 3]), torch.Size([H, W]), torch.Size([H, W])
+
+def decouple_pcds(scene, scene_state, flow_info: dict):
+    '''
+    flow_into.keys: left_forward_flows, left_backward_flows, right_forward_flows, right_backward_flows, left_valid_masks, right_valid_masks
+    
+    output: dynamic_pcds: list of pcds, static_pcds: list of pcds
+    '''
+    
+    left_forward_flows = flow_info['left_forward_flows']    # list of torch.Size([288, 512, 2]), len: pair_num - 1
+    left_backward_flows = flow_info['left_backward_flows']  # list of torch.Size([288, 512, 2]), len: pair_num - 1
+    right_forward_flows = flow_info['right_forward_flows']  
+    right_backward_flows = flow_info['right_backward_flows']
+    left_valid_masks = flow_info['left_valid_masks']        # list of torch.Size([1, 1, 288, 512]), len: pair_num - 1
+    right_valid_masks = flow_info['right_valid_masks']
+    
+    dynamic_pcds = []
+    static_pcds = []
+    left_dynamic_pixels_score_lst = []
+    right_dynamic_pixels_score_lst = []
+    focal = scene.get_focals().cpu()
+    pose = scene.get_im_poses().cpu()
+    sparse_pts3d = scene.get_sparse_pts3d()
+    dense_pts3d, depthmaps, confs = scene.get_dense_pts3d(clean_depth = True)
+    #dense_pts3d: list of torch.Size([147456, 3]), len: pair_num * 2
+    #conf: list of torch.Size([288, 512]), len: pair_num * 2
+    #pose: torch.Size([pair_num * 2, 4, 4])
+    
+    pair_num = len(dense_pts3d) // 2
+    assert pair_num == (len(left_forward_flows) + 1), 'pair_num mismatch'
+    
+    #dense_pts3d, conf, flow를 이용해서 dynamic, static pcds 구하기
+    for i in range(pair_num - 1):
+        left_pts3d_1 = dense_pts3d[i * 2]                               # torch.Size([147456, 3])
+        right_pts3d_1 = dense_pts3d[i * 2 + 1]
+        left_conf_1 = confs[i * 2]                                      # torch.Size([288, 512])
+        right_conf_1 = confs[i * 2 + 1]
+        left_pts3d_2 = dense_pts3d[i * 2 + 2]
+        right_pts3d_2 = dense_pts3d[i * 2 + 3]
+        left_conf_2 = confs[i * 2 + 2]
+        right_conf_2 = confs[i * 2 + 3]
+        
+        #fwd: i -> i+1, 기준좌표계: i
+        #bwd: i+1 -> i, 기준좌표계: i+1
+        left_forward_flow = left_forward_flows[i]                       # torch.Size([288, 512, 2])
+        right_forward_flow = right_forward_flows[i]
+        left_backward_flow = left_backward_flows[i]
+        right_backward_flow = right_backward_flows[i]
+        # left_valid_mask = left_valid_masks[i].squeeze(0).squeeze(0)     # torch.Size([288, 512])
+        # right_valid_mask = right_valid_masks[i].squeeze(0).squeeze(0)
+        
+        left_pose_1 = pose[i * 2]
+        right_pose_1 = pose[i * 2 + 1]
+        left_pose_2 = pose[i * 2 + 2]
+        right_pose_2 = pose[i * 2 + 3]
+        
+        left_depth_1 = depthmaps[i * 2]
+        right_depth_1 = depthmaps[i * 2 + 1]
+        left_depth_2 = depthmaps[i * 2 + 2]
+        right_depth_2 = depthmaps[i * 2 + 3]
+        
+        dynamic_pcds_i, static_pcds_i, left_dynamic_pixels_score, right_dynamic_pixels_score = \
+            decouple_adjacent_pcds(left_pcds_1 = left_pts3d_1, right_pcds_1 = right_pts3d_1,
+                                   left_conf_1 = left_conf_1, right_conf_1 = right_conf_1,
+                                   left_pcds_2 = left_pts3d_2, right_pcds_2 = right_pts3d_2,
+                                   left_conf_2 = left_conf_2, right_conf_2 = right_conf_2,
+                                   left_fwd_flow = left_forward_flow, right_fwd_flow = right_forward_flow,
+                                   left_bwd_flow = left_backward_flow, right_bwd_flow = right_backward_flow,
+                                   left_pose_1 = left_pose_1, right_pose_1 = right_pose_1,
+                                   left_pose_2 = left_pose_2, right_pose_2 = right_pose_2,
+                                   left_depth_1 = left_depth_1, right_depth_1 = right_depth_1,
+                                   left_depth_2 = left_depth_2, right_depth_2 = right_depth_2,
+                                   left_focal = focal[i * 2], right_focal = focal[i * 2 + 1],)
+        
+        dynamic_pcds.append(dynamic_pcds_i)
+        static_pcds.append(static_pcds_i)
+        left_dynamic_pixels_score_lst.append(left_dynamic_pixels_score)
+        right_dynamic_pixels_score_lst.append(right_dynamic_pixels_score)
+
+    return dynamic_pcds, static_pcds, left_dynamic_pixels_score_lst, right_dynamic_pixels_score_lst
+
+
+def tmp_load_dynamic_mask(mask_path: str, imsize: tuple, seq_num: int):
+    mask_files = sorted(os.listdir(mask_path))
+    print("mask_files: ", mask_files)
+    dynamic_mask = []
+    for mask_file in mask_files:
+        mask = cv2.imread(os.path.join(mask_path, mask_file), cv2.IMREAD_GRAYSCALE)
+        assert mask.shape == imsize, 'mask shape mismatch'
+        assert seq_num * 2 == len(mask_files), 'mask file num mismatch'
+        dynamic_mask.append(mask)
+    return dynamic_mask
+
 # def forward_two_images(data_path, outdir, gradio_delete_cache, model, device, silent, image_size, current_scene_state,
 #                             filelist, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
 #                             as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size, scenegraph_type, winsize,
@@ -1081,7 +1473,6 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     # scene, inputfiles, optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr,
     # as_pointcloud, mask_sky, clean_depth, transparent_cams, cam_size,
     # scenegraph_type, winsize, win_cyclic, refid, TSDF_thresh, shared_intrinsics
-    
     cache_dir = os.path.join('/workspace/data/jeonghonoh/mast3r/', 'cache')
     if not os.path.isdir(cache_dir):
         os.makedirs(cache_dir, exist_ok=True)
@@ -1097,7 +1488,12 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     
     samples = load_stereo_data(data_path, srt_frame, end_frame, size=image_size, verbose=not silent)
     # breakpoint()
-    filelist_total, pairs_total = make_stereo_pairs(samples) #filelist: 이미지 경로 리스트 2n개, pairs: 이미지 쌍의 리스트 n개
+    
+    align_mode = True
+    if align_mode:
+        filelist_total, pairs_total = align_mode_stereo_pairs(samples) #(n + (n-1))*2
+    else:
+        filelist_total, pairs_total = make_stereo_pairs(samples) #filelist: 이미지 경로 리스트 2n개, pairs: 이미지 쌍의 리스트 n개
     
     # get flow (FlowFormer++)
     flowformer_model = build_model()
@@ -1119,7 +1515,9 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
         for right_forward_flow, right_backward_flow in zip(right_forward_flows, right_backward_flows):
             right_valid_mask = get_valid_flow_mask(right_forward_flow.unsqueeze(0).permute(0, 3, 1, 2), right_backward_flow.unsqueeze(0).permute(0, 3, 1, 2))
             right_valid_masks.append(right_valid_mask)
-
+    flow_info = {'left_forward_flows': left_forward_flows, 'left_backward_flows': left_backward_flows,
+                 'right_forward_flows': right_forward_flows, 'right_backward_flows': right_backward_flows,
+                 'left_valid_masks': left_valid_masks, 'right_valid_masks': right_valid_masks}
     # breakpoint() #check: left_valid_mask, right_valid_mask ratio (0.85~0.95)
     # valid mask visualization
     debug_mode = True
@@ -1148,172 +1546,196 @@ def forward_two_images(data_path, srt_frame, end_frame, model, device, image_siz
     scene_state_lst = []
     initialize_pose = False
     initialize_values = {}
-    for filelist, pairs in zip(filelist_total, pairs_total):
-        scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
+    
+    if align_mode:
+        scene = sparse_global_alignment(imgs = filelist_total, pairs_in = pairs_total, cache_path = cache_dir,
                                         model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
                                         opt_depth = 'depth' in optim_level, shared_intrinsics = shared_intrinsics,
                                         matching_conf_thr = matching_conf_thr, initialize_pose = initialize_pose, initialize_values = initialize_values)
+        
         focal = scene.get_focals().cpu()
         pose = scene.get_im_poses().cpu()
         sparse_pts3d = scene.get_sparse_pts3d()
         dense_pts3d, depthmaps, confs = scene.get_dense_pts3d(clean_depth = True)
-        focal_total.append(focal)
-        pose_total.append(pose)
-        sparse_pts3d_total.append(sparse_pts3d)
-        dense_pts3d_total.append(dense_pts3d)
-        depthmaps_total.append(depthmaps)
-        confs_total.append(confs)
-
-        
-        initialize_pose = True
-        pose_np = pose.numpy()
-        R_mat = pose_np[:, :3, :3]
-        tran = pose_np[:, :3, 3].astype(np.float32)
-        # quaternion (x, y, z, w)
-        quat = rotmat_to_unitquat_custom(R_mat, wxyz=False) #xyzw
-        # breakpoint()
-        initialize_values['quats'] = quat
-        initialize_values['trans'] = tran
-        
+        name = f"align_{srt_frame}_{end_frame}"
         scene_state = SparseGAState(scene, False, cache_dir, None)
-        scene_state_lst.append(scene_state)
+        
+        dynamic_pcds, static_pcds, left_dynamic_pixels_score_lst, right_dynamic_pixels_score_lst = decouple_pcds(scene, scene_state, flow_info)
+        
+        align_convert_dual_scene_to_ply(scene_state, 'output/', seq, name, clean_depth = True, min_conf_thr = 0.2)
         # breakpoint()
-        debug_mode = True #save ply
+        dynamic_masks = tmp_load_dynamic_mask('input/mask', (288, 512), end_frame - srt_frame + 1)
+        #gaussian joint optimization (initialize gaussians as static pcds and initial pose given by scene.get_im_poses().cpu(), use masked smooth photometric loss)
+        breakpoint()
+        
+        return samples, filelist_total, scene, scene_state, dynamic_masks
+    else:
+        for filelist, pairs in zip(filelist_total, pairs_total):
+            scene = sparse_global_alignment(imgs = filelist, pairs_in = pairs, cache_path = cache_dir,
+                                            model = model, lr1 = lr1, niter1 = niter1, lr2 = lr2, niter2 = niter2, device = device,
+                                            opt_depth = 'depth' in optim_level, shared_intrinsics = shared_intrinsics,
+                                            matching_conf_thr = matching_conf_thr, initialize_pose = initialize_pose, initialize_values = initialize_values)
+            focal = scene.get_focals().cpu()
+            pose = scene.get_im_poses().cpu()
+            sparse_pts3d = scene.get_sparse_pts3d()
+            dense_pts3d, depthmaps, confs = scene.get_dense_pts3d(clean_depth = True)
+            focal_total.append(focal)
+            pose_total.append(pose)
+            sparse_pts3d_total.append(sparse_pts3d)
+            dense_pts3d_total.append(dense_pts3d)
+            depthmaps_total.append(depthmaps)
+            confs_total.append(confs)
+
+            
+            # initialize_pose = True
+            pose_np = pose.numpy()
+            R_mat = pose_np[:, :3, :3]
+            tran = pose_np[:, :3, 3].astype(np.float32)
+            # quaternion (x, y, z, w)
+            quat = rotmat_to_unitquat_custom(R_mat, wxyz=False) #xyzw
+            # breakpoint()
+            initialize_values['quats'] = quat
+            initialize_values['trans'] = tran
+            
+            scene_state = SparseGAState(scene, False, cache_dir, None)
+            scene_state_lst.append(scene_state)
+            # breakpoint()
+            debug_mode = True #save ply
+            if debug_mode:
+                name = filelist[0].split('/')[-1].split('_')[0]
+                export_path = convert_dual_scene_to_ply(scene_state, 'output/', seq, name, clean_depth = True, min_conf_thr = 0.2)
+    
+
+        for pose, sample in zip(pose_total, samples):
+            (left_c2w, right_c2w) = pose
+            relative_pose_l2r = torch.inverse(left_c2w) @ right_c2w
+            relative_pose_pred = to_numpy(relative_pose_l2r)
+            
+            left_gt_pose = sample["left_pose"]
+            right_gt_pose = sample["right_pose"]
+            relative_pose_gt = np.linalg.inv(left_gt_pose) @ right_gt_pose
+            
+            # print(f'Ground truth left pose: \n{left_gt_pose}')
+            # print(f'Ground truth right pose: \n{right_gt_pose}')
+            # print(f'Predicted left pose: \n{left_c2w}')
+            # print(f'Predicted right pose: \n{right_c2w}')
+            
+            # print(f'Ground truth relative pose: \n{relative_pose_gt}')
+            # print(f'Predicted relative pose: \n{relative_pose_pred}')
+
+            # print(f'Ground truth relative pose: \n{relative_pose_gt}')
+            # print(f'Predicted relative pose: \n{relative_pose_pred}')
+            rot_err, trans_err = evaluate_relative_pose_error(relative_pose_pred, relative_pose_gt)
+            print(f'Rotation error: {rot_err:.4f} rad, Translation error: {trans_err:.4f} m')
+
+        
+        
+        
+        # if debug_mode:
+        #     convert_multiple_dual_scene_to_ply(scene_state_lst, 'output/', seq, clean_depth = True, min_conf_thr = 0.2)    
+
+        assert len(dense_pts3d_total) == (len(left_forward_flows) + 1)
+
+        #dynamic mask
+        debug_mode = True
+        left_index = 0
+        right_index = 1
+        for idx, (left_forward_flow, left_backward_flow, left_valid) in enumerate(zip(left_forward_flows, left_backward_flows, left_valid_masks)):
+            # dense_pts3d: list of torch.Tensor, 2 of (H * W, 3) -> (H, W, 3)
+            # left_forward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
+            # left_backward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
+            # left_valid: torch.Tensor, (1, 1, W, H) -> (1, H, W)
+            H, W, _ = left_forward_flow.shape
+            
+            dense_pts3d_prev = dense_pts3d_total[idx][left_index]
+            dense_pts3d_next = dense_pts3d_total[idx + 1][left_index]
+            cam2world_prev = pose_total[idx][left_index]
+            cam2world_next = pose_total[idx + 1][left_index]
+            
+            dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(pts3d_1 = dense_pts3d_prev.reshape(H, W, 3), 
+                                                                        pts3d_2 = dense_pts3d_next.reshape(H, W, 3), 
+                                                                        flow_12 = left_forward_flow.permute(2, 0, 1), 
+                                                                        flow_21 = left_backward_flow.permute(2, 0, 1), 
+                                                                        valid = left_valid.squeeze(0).permute(0, 2, 1), 
+                                                                        transform_1 = cam2world_prev,
+                                                                        transform_2 = cam2world_next,
+                                                                        normalize=True,
+                                                                        normalize_thres = 1.5)
+            if debug_mode:
+                #save dynamic mask
+                mask_output_path = os.path.join('/workspace/data/jeonghonoh/mast3r/output', seq, 'dynamic_mask')
+                os.makedirs(mask_output_path, exist_ok=True)
+                left_mask_path = os.path.join(mask_output_path, 'left')
+                os.makedirs(left_mask_path, exist_ok=True)
+
+                # dynamic_mask_1.device: cuda:0
+                dynamic_mask_1 = dynamic_mask_1.cpu().numpy().astype(np.uint8) * 255
+                dynamic_mask_2 = dynamic_mask_2.cpu().numpy().astype(np.uint8) * 255
+                cv2.imwrite(os.path.join(left_mask_path, f'{0}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
+                cv2.imwrite(os.path.join(left_mask_path, f'{1}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
+
+        # breakpoint()
+
+        for idx, (right_forward_flow, right_backward_flow, right_valid) in enumerate(zip(right_forward_flows, right_backward_flows, right_valid_masks)):
+            dense_pts3d_prev = dense_pts3d_total[idx][right_index]
+            dense_pts3d_next = dense_pts3d_total[idx + 1][right_index]
+            cam2world_prev = pose_total[idx][right_index]
+            cam2world_next = pose_total[idx + 1][right_index]
+            dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(pts3d_1 = dense_pts3d_prev.reshape(H, W, 3), 
+                                                                        pts3d_2 = dense_pts3d_next.reshape(H, W, 3), 
+                                                                        flow_12 = right_forward_flow.permute(2, 0, 1), 
+                                                                        flow_21 = right_backward_flow.permute(2, 0, 1), 
+                                                                        valid = right_valid.squeeze(0).permute(0, 2, 1), 
+                                                                        transform_1 = cam2world_prev,
+                                                                        transform_2 = cam2world_next,
+                                                                        normalize=True,
+                                                                        normalize_thres = 1.5)
+            if debug_mode:
+                right_mask_path = os.path.join(mask_output_path, 'right')
+                os.makedirs(right_mask_path, exist_ok=True)
+                dynamic_mask_1 = dynamic_mask_1.cpu().numpy().astype(np.uint8) * 255
+                dynamic_mask_2 = dynamic_mask_2.cpu().numpy().astype(np.uint8) * 255
+                cv2.imwrite(os.path.join(right_mask_path, f'{0}_{right_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
+                cv2.imwrite(os.path.join(right_mask_path, f'{1}_{right_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
+
+
+
+
+        # # get flow (RAFT)
+        # # list of images, each of shape: (288, 512, 3)
+        # left_imgs, right_imgs = make_flow_image_lists(samples)
+        # # (num - 1, 2, 288, 512)
+        # (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask) = get_flow(left_imgs, right_imgs)
+        # # breakpoint()
+        debug_mode = True
         if debug_mode:
-            name = filelist[0].split('/')[-1].split('_')[0]
-            export_path = convert_dual_scene_to_ply(scene_state, 'output/', seq, name, clean_depth = True, min_conf_thr = 0.2)
-    
-
-    for pose, sample in zip(pose_total, samples):
-        (left_c2w, right_c2w) = pose
-        relative_pose_l2r = torch.inverse(left_c2w) @ right_c2w
-        relative_pose_pred = to_numpy(relative_pose_l2r)
-        
-        left_gt_pose = sample["left_pose"]
-        right_gt_pose = sample["right_pose"]
-        relative_pose_gt = np.linalg.inv(left_gt_pose) @ right_gt_pose
-        
-        # print(f'Ground truth left pose: \n{left_gt_pose}')
-        # print(f'Ground truth right pose: \n{right_gt_pose}')
-        # print(f'Predicted left pose: \n{left_c2w}')
-        # print(f'Predicted right pose: \n{right_c2w}')
-        
-        # print(f'Ground truth relative pose: \n{relative_pose_gt}')
-        # print(f'Predicted relative pose: \n{relative_pose_pred}')
-
-        # print(f'Ground truth relative pose: \n{relative_pose_gt}')
-        # print(f'Predicted relative pose: \n{relative_pose_pred}')
-        rot_err, trans_err = evaluate_relative_pose_error(relative_pose_pred, relative_pose_gt)
-        print(f'Rotation error: {rot_err:.4f} rad, Translation error: {trans_err:.4f} m')
-
-    
-    
-    
-    # if debug_mode:
-    #     convert_multiple_dual_scene_to_ply(scene_state_lst, 'output/', seq, clean_depth = True, min_conf_thr = 0.2)    
-
-    assert len(dense_pts3d_total) == (len(left_forward_flows) + 1)
-
-    #dynamic mask
-    debug_mode = True
-    left_index = 0
-    right_index = 1
-    for idx, (left_forward_flow, left_backward_flow, left_valid) in enumerate(zip(left_forward_flows, left_backward_flows, left_valid_masks)):
-        # dense_pts3d: list of torch.Tensor, 2 of (H * W, 3) -> (H, W, 3)
-        # left_forward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
-        # left_backward_flow: torch.Tensor, (H, W, 2) -> (2, H, W)
-        # left_valid: torch.Tensor, (1, 1, W, H) -> (1, H, W)
-        H, W, _ = left_forward_flow.shape
-        
-        dense_pts3d_prev = dense_pts3d_total[idx][left_index]
-        dense_pts3d_next = dense_pts3d_total[idx + 1][left_index]
-        cam2world_prev = pose_total[idx][left_index]
-        cam2world_next = pose_total[idx + 1][left_index]
-        
-        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(pts3d_1 = dense_pts3d_prev.reshape(H, W, 3), 
-                                                                       pts3d_2 = dense_pts3d_next.reshape(H, W, 3), 
-                                                                       flow_12 = left_forward_flow.permute(2, 0, 1), 
-                                                                       flow_21 = left_backward_flow.permute(2, 0, 1), 
-                                                                       valid = left_valid.squeeze(0).permute(0, 2, 1), 
-                                                                       transform_1 = cam2world_prev,
-                                                                       transform_2 = cam2world_next,
-                                                                       normalize=True,
-                                                                       normalize_thres = 1.5)
-        if debug_mode:
-            #save dynamic mask
-            mask_output_path = os.path.join('/workspace/data/jeonghonoh/mast3r/output', seq, 'dynamic_mask')
-            os.makedirs(mask_output_path, exist_ok=True)
-            left_mask_path = os.path.join(mask_output_path, 'left')
-            os.makedirs(left_mask_path, exist_ok=True)
-
-            # dynamic_mask_1.device: cuda:0
-            dynamic_mask_1 = dynamic_mask_1.cpu().numpy().astype(np.uint8) * 255
-            dynamic_mask_2 = dynamic_mask_2.cpu().numpy().astype(np.uint8) * 255
-            cv2.imwrite(os.path.join(left_mask_path, f'{0}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
-            cv2.imwrite(os.path.join(left_mask_path, f'{1}_{left_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
-
-    # breakpoint()
-
-    for idx, (right_forward_flow, right_backward_flow, right_valid) in enumerate(zip(right_forward_flows, right_backward_flows, right_valid_masks)):
-        dense_pts3d_prev = dense_pts3d_total[idx][right_index]
-        dense_pts3d_next = dense_pts3d_total[idx + 1][right_index]
-        cam2world_prev = pose_total[idx][right_index]
-        cam2world_next = pose_total[idx + 1][right_index]
-        dynamic_mask_1, dynamic_mask_2 = find_dynamic_mask_using_pts3d(pts3d_1 = dense_pts3d_prev.reshape(H, W, 3), 
-                                                                       pts3d_2 = dense_pts3d_next.reshape(H, W, 3), 
-                                                                       flow_12 = right_forward_flow.permute(2, 0, 1), 
-                                                                       flow_21 = right_backward_flow.permute(2, 0, 1), 
-                                                                       valid = right_valid.squeeze(0).permute(0, 2, 1), 
-                                                                       transform_1 = cam2world_prev,
-                                                                       transform_2 = cam2world_next,
-                                                                       normalize=True,
-                                                                       normalize_thres = 1.5)
-        if debug_mode:
-            right_mask_path = os.path.join(mask_output_path, 'right')
-            os.makedirs(right_mask_path, exist_ok=True)
-            dynamic_mask_1 = dynamic_mask_1.cpu().numpy().astype(np.uint8) * 255
-            dynamic_mask_2 = dynamic_mask_2.cpu().numpy().astype(np.uint8) * 255
-            cv2.imwrite(os.path.join(right_mask_path, f'{0}_{right_names[idx]}_dynamic_mask.png'), dynamic_mask_1)
-            cv2.imwrite(os.path.join(right_mask_path, f'{1}_{right_names[idx]}_dynamic_mask.png'), dynamic_mask_2)
-
-
-
-
-    # # get flow (RAFT)
-    # # list of images, each of shape: (288, 512, 3)
-    # left_imgs, right_imgs = make_flow_image_lists(samples)
-    # # (num - 1, 2, 288, 512)
-    # (left_flow_forward, left_flow_backward, left_valid_mask), (right_flow_forward, right_flow_backward, right_valid_mask) = get_flow(left_imgs, right_imgs)
-    # # breakpoint()
-    debug_mode = True
-    if debug_mode:
-        #save every images, flows
-        output_save_path = '/workspace/data/jeonghonoh/mast3r/output'
-        os.makedirs(output_save_path, exist_ok=True)
-        img_path = os.path.join(output_save_path, seq, 'images')
-        os.makedirs(img_path, exist_ok=True)
-        flow_path = os.path.join(output_save_path, seq, 'flows')
-        os.makedirs(flow_path, exist_ok=True)
-        flow_valid_path = os.path.join(output_save_path, seq, 'flow_valid')
-        os.makedirs(flow_valid_path, exist_ok=True)
-        img_path_left = os.path.join(img_path, 'left')
-        os.makedirs(img_path_left, exist_ok=True)
-        img_path_right = os.path.join(img_path, 'right')
-        os.makedirs(img_path_right, exist_ok=True)
-        flow_path_left = os.path.join(flow_path, 'left')
-        os.makedirs(flow_path_left, exist_ok=True)
-        flow_path_right = os.path.join(flow_path, 'right')
-        os.makedirs(flow_path_right, exist_ok=True)
-        # flow_valid_path_left = os.path.join(flow_valid_path, 'left')
-        # os.makedirs(flow_valid_path_left, exist_ok=True)
-        # flow_valid_path_right = os.path.join(flow_valid_path, 'right')
-        # os.makedirs(flow_valid_path_right, exist_ok=True)
-        sample_num_list = [sample["sample_number"] for sample in samples]
-        for sample_num, sample in zip(sample_num_list, samples):
-            left_img = sample["left_img"]
-            right_img = sample["right_img"]
-            left_img.save(os.path.join(img_path_left, f'{sample_num}_left.png'))
-            right_img.save(os.path.join(img_path_right, f'{sample_num}_right.png'))
+            #save every images, flows
+            output_save_path = '/workspace/data/jeonghonoh/mast3r/output'
+            os.makedirs(output_save_path, exist_ok=True)
+            img_path = os.path.join(output_save_path, seq, 'images')
+            os.makedirs(img_path, exist_ok=True)
+            flow_path = os.path.join(output_save_path, seq, 'flows')
+            os.makedirs(flow_path, exist_ok=True)
+            # flow_valid_path = os.path.join(output_save_path, seq, 'flow_valid')
+            # os.makedirs(flow_valid_path, exist_ok=True)
+            img_path_left = os.path.join(img_path, 'left')
+            os.makedirs(img_path_left, exist_ok=True)
+            img_path_right = os.path.join(img_path, 'right')
+            os.makedirs(img_path_right, exist_ok=True)
+            # flow_path_left = os.path.join(flow_path, 'left')
+            # os.makedirs(flow_path_left, exist_ok=True)
+            # flow_path_right = os.path.join(flow_path, 'right')
+            # os.makedirs(flow_path_right, exist_ok=True)
+            # flow_valid_path_left = os.path.join(flow_valid_path, 'left')
+            # os.makedirs(flow_valid_path_left, exist_ok=True)
+            # flow_valid_path_right = os.path.join(flow_valid_path, 'right')
+            # os.makedirs(flow_valid_path_right, exist_ok=True)
+            sample_num_list = [sample["sample_number"] for sample in samples]
+            for sample_num, sample in zip(sample_num_list, samples):
+                left_img = sample["left_img"]
+                right_img = sample["right_img"]
+                left_img.save(os.path.join(img_path_left, f'{sample_num}_left.png'))
+                right_img.save(os.path.join(img_path_right, f'{sample_num}_right.png'))
     #     for sample_num, (left_flow, right_flow) in zip(sample_num_list, zip(left_flow_forward, right_flow_forward)):
     #         #flow: (2, 288, 512)
     #         left_img = flow_to_image(left_flow.permute(1, 2, 0).cpu().numpy())

@@ -149,9 +149,10 @@ def sparse_global_alignment(imgs, pairs_in, cache_path, model, subsample=8, desc
     tmp_pairs, pairwise_scores, canonical_views, canonical_paths, preds_21 = \
         prepare_canonical_data(imgs, pairs, subsample, cache_path=cache_path, mode='avg-angle', device=device)
     # breakpoint()
-
+    print("pairwise_scores: ", pairwise_scores)
     # compute minimal spanning tree
     mst = compute_min_spanning_tree(pairwise_scores)
+    # mst = dual_build_mst(pairwise_scores)
     # breakpoint()
     # remove all edges not in the spanning tree?
     # min_spanning_tree = {(imgs[i],imgs[j]) for i,j in mst[1]}
@@ -184,9 +185,13 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
     init = copy.deepcopy(init)
     fixed_focal = True
     if fixed_focal:
-        assert len(imgs) == 2
+        assert len(imgs) % 2 == 0
+        # 360.7, 361.6 개수만큼 반복
         base_focals = torch.tensor([360.7, 361.6], device=device, dtype=dtype)
+        rep_factor = len(imgs) // 2
+        base_focals = base_focals.repeat(rep_factor)
     # extrinsic parameters
+    initialize_pose = False
     if initialize_pose:
         # print('initialize pose: sequential')
         # print(f'pose values: {initialize_values}')
@@ -684,6 +689,7 @@ def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_con
         ptmaps11 = None
         pixels = {}
         n = 0
+        # breakpoint()
         for (img1, img2), ((path1, path2), path_corres) in tmp_pairs.items():
             score = None
             if img == img1:
@@ -721,7 +727,7 @@ def prepare_canonical_data(imgs, tmp_pairs, subsample, order_imgs=False, min_con
                 ptmaps11[n] = X
                 confs11[n] = C
                 n += 1
-
+        # breakpoint()
         if canon is None:
             canon, canon2, cconf = canonical_view(ptmaps11, confs11, subsample, **kw)
             del ptmaps11
@@ -1037,6 +1043,11 @@ def compute_min_spanning_tree(pws):
     edges = [(predecessors[i], i) for i in order]
 
     return root, edges
+
+def dual_build_mst(pws):
+    L, _ = pws.shape
+    
+    return
 
 
 def show_reconstruction(shapes_or_imgs, K, cam2w, pts3d, gt_cam2w=None, gt_K=None, cam_size=None, masks=None, **kw):
